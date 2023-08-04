@@ -32,3 +32,10 @@
 *.swp
 
 build/*
+
+*.egg-info
+*.ini
+dist
+.vscode
+build
+build-cmake

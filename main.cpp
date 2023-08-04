@@ -1,34 +1,28 @@
-#include <igl/opengl/glfw/Viewer.h>
 
-int main(int argc, char *argv[])
-{
-  // Inline mesh of a cube
-  const Eigen::MatrixXd V= (Eigen::MatrixXd(8,3)<<
-    0.0,0.0,0.0,
-    0.0,0.0,1.0,
-    0.0,1.0,0.0,
-    0.0,1.0,1.0,
-    1.0,0.0,0.0,
-    1.0,0.0,1.0,
-    1.0,1.0,0.0,
-    1.0,1.0,1.0).finished();
-  const Eigen::MatrixXi F = (Eigen::MatrixXi(12,3)<<
-    0,6,4,
-    0,2,6,
-    0,3,2,
-    0,1,3,
-    2,7,6,
-    2,3,7,
-    4,6,7,
-    4,7,5,
-    0,4,5,
-    0,5,1,
-    1,5,7,
-    1,7,3).finished();
+#include <pybind11/eigen.h>
+#include <pybind11/numpy.h>
+#include <pybind11/pybind11.h>
 
-  // Plot the mesh
-  igl::opengl::glfw::Viewer viewer;
-  viewer.data().set_mesh(V, F);
-  viewer.data().set_face_based(true);
-  viewer.launch();
+#include <iostream>
+
+namespace py = pybind11;
+using RowMatrixXd =
+    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+using RowMatrixXi =
+    Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
+                          Eigen::Ref<const RowMatrixXi> F,
+                          Eigen::Ref<const RowMatrixXd> VN,
+                          Eigen::Ref<const RowMatrixXd> Q) {
+  std::cout << "trace_flow_lines" << std::endl;
+
+  py::list return_list;
+  return return_list;
+}
+
+PYBIND11_MODULE(flow_lines, m) {
+  m.doc() = "Trace flow lines";
+  m.def("trace", &trace_flow_lines,
+        py::return_value_policy::reference_internal, "Sample occlusions");
 }
