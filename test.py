@@ -11,3 +11,10 @@ if __name__ == '__main__':
     Q = np.load('test_data/Q.npy')
 
     flow_lines.trace(V, F, VN, Q)
+
+    exit()
+
+    ps.init()
+    mesh_vis = ps.register_surface_mesh("mesh", V, F)
+    mesh_vis.add_vector_quantity("VN", VN, enabled=True)
+    ps.show()

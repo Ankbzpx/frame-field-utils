@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(flow_lines)
 
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # Libigl
