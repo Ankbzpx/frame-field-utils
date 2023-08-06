@@ -296,20 +296,29 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   for (size_t idx = 0; idx < n_lines; idx++) {
     total_valid += valid_steps[idx];
   }
-  RowMatrixXd V_stroke;
+  RowMatrixXd V_stroke, VC_stroke;
   RowMatrixXi F_stroke;
   V_stroke.setZero(2 * total_valid, 3);
+  VC_stroke.setZero(2 * total_valid, 3);
   F_stroke.setZero(2 * (total_valid - n_lines), 3);
 
   int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
+
+    double hue = std::fmod(randi(idx) * M_PI, 1.0);
+    Eigen::RowVector3d color;
+    hsv_to_rgb(&color, hue, 0.75, 0.5 + 0.35 * randd());
+
     for (size_t i = 0; i < n_valid; i++) {
       Eigen::RowVector3d pos = positions[idx]->row(i);
       Eigen::RowVector3d t = bitangents[idx]->row(i);
 
       V_stroke.row(base + 2 * i) = pos + line_width * t;
       V_stroke.row(base + 2 * i + 1) = pos - line_width * t;
+
+      VC_stroke.row(base + 2 * i) = color;
+      VC_stroke.row(base + 2 * i + 1) = color;
 
       if (i != n_valid - 1) {
         int v0 = base + 2 * i;
@@ -328,6 +337,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   py::list return_list;
   return_list.append(V_stroke);
   return_list.append(F_stroke);
+  return_list.append(VC_stroke);
   return return_list;
 }
 

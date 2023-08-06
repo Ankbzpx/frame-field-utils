@@ -14,5 +14,6 @@ if __name__ == '__main__':
 
     ps.init()
     ps.register_surface_mesh("mesh", V, F)
-    ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
+    strokes_vis = ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
+    strokes_vis.add_color_quantity('color', strokes[2], enabled=True)
     ps.show()
