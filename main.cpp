@@ -191,16 +191,54 @@ void compact_tangent(Eigen::RowVector3d* q, const Eigen::RowVector3d& n,
   *q = best_qp;
 }
 
+// https://github.com/wjakob/instant-meshes/blob/7b3160864a2e1025af498c84cfed91cbfb613698/src/common.h#L358
+void hsv_to_rgb(Eigen::RowVector3d* rgb, double h, double s, double v) {
+  if (s == 0.f) {  // achromatic (grey)
+    rgb->setConstant(v);
+    return;
+  }
+  h *= 6;
+  int i = std::floor(h);
+  double f = h - i;  // fractional part of h
+  double p = v * (1 - s);
+  double q = v * (1 - s * f);
+  double t = v * (1 - s * (1 - f));
+  switch (i) {
+    case 0:
+      *rgb << v, t, p;
+      break;
+    case 1:
+      *rgb << q, v, p;
+      break;
+    case 2:
+      *rgb << p, v, t;
+      break;
+    case 3:
+      *rgb << p, q, v;
+      break;
+    case 4:
+      *rgb << t, p, v;
+      break;
+    default:
+      *rgb << v, p, q;
+      break;
+  }
+}
+
 py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
                           Eigen::Ref<const RowMatrixXi> F,
                           Eigen::Ref<const RowMatrixXd> VN,
-                          Eigen::Ref<const RowMatrixXd> Q, int n_steps,
-                          int n_lines) {
+                          Eigen::Ref<const RowMatrixXd> Q, int n_lines,
+                          double length_factor, double interval_factor,
+                          double offset_factor, double width_factor) {
   double avg_edge_length = igl::avg_edge_length(V, F);
-  double step_size = avg_edge_length / 2.0;
-  double offset = avg_edge_length / 5.0;
-  double line_width = avg_edge_length / 10.0;
-  double variation = avg_edge_length / 20.0;
+
+  int n_steps = static_cast<int>(length_factor * interval_factor);
+  double step_size = avg_edge_length / (2.0 * interval_factor);
+
+  double offset = avg_edge_length * offset_factor;
+  double line_width = avg_edge_length * width_factor;
+  double delta = avg_edge_length * (offset_factor * 2.0);
 
   igl::embree::EmbreeIntersector intersector;
   intersector.init(V.cast<float>(), F.cast<int>(), true);
@@ -221,6 +259,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
 
         int i = 0;
         int fid = randi(F.rows());
+        double variation = randd() * delta;
 
         Eigen::RowVector3d bary_coord;
         random_point_in_triangle(&bary_coord);
@@ -232,7 +271,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
 
         for (i = 0; i < n_steps; i++) {
           vertex_weighted_position(&o, bary_coord, fid, F, V);
-          o += (offset + randd() * variation) * n;
+          o += (offset + variation) * n;
 
           // Record traced position
           os.row(i) = o;
@@ -253,39 +292,42 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
       },
       1000);
 
-  py::list return_list;
+  int total_valid = 0;
+  for (size_t idx = 0; idx < n_lines; idx++) {
+    total_valid += valid_steps[idx];
+  }
+  RowMatrixXd V_stroke;
+  RowMatrixXi F_stroke;
+  V_stroke.setZero(2 * total_valid, 3);
+  F_stroke.setZero(2 * (total_valid - n_lines), 3);
+
+  int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
-    RowMatrixXd V_stroke;
-    RowMatrixXi F_stroke;
-
-    V_stroke.setZero(2 * n_valid, 3);
-    F_stroke.setZero(2 * (n_valid - 1), 3);
-
     for (size_t i = 0; i < n_valid; i++) {
       Eigen::RowVector3d pos = positions[idx]->row(i);
       Eigen::RowVector3d t = bitangents[idx]->row(i);
 
-      V_stroke.row(2 * i) = pos + line_width * t;
-      V_stroke.row(2 * i + 1) = pos - line_width * t;
+      V_stroke.row(base + 2 * i) = pos + line_width * t;
+      V_stroke.row(base + 2 * i + 1) = pos - line_width * t;
 
       if (i != n_valid - 1) {
-        int v0 = 2 * i;
-        int v1 = 2 * i + 1;
+        int v0 = base + 2 * i;
+        int v1 = base + 2 * i + 1;
 
-        int v2 = 2 * (i + 1);
-        int v3 = 2 * (i + 1) + 1;
+        int v2 = base + 2 * (i + 1);
+        int v3 = base + 2 * (i + 1) + 1;
 
-        F_stroke.row(2 * i) << v0, v1, v2;
-        F_stroke.row(2 * i + 1) << v1, v3, v2;
+        F_stroke.row(base - 2 * idx + 2 * i) << v0, v1, v2;
+        F_stroke.row(base - 2 * idx + 2 * i + 1) << v1, v3, v2;
       }
     }
-    py::list stroke;
-    stroke.append(V_stroke);
-    stroke.append(F_stroke);
-    return_list.append(stroke);
+    base += 2 * n_valid;
   }
 
+  py::list return_list;
+  return_list.append(V_stroke);
+  return_list.append(F_stroke);
   return return_list;
 }
 

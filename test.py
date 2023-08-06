@@ -10,11 +10,9 @@ if __name__ == '__main__':
     VN = np.load('test_data/VN.npy')
     Q = np.load('test_data/Q.npy')
 
-    strokes = flow_lines.trace(V, F, VN, Q, 20, 100)
+    strokes = flow_lines.trace(V, F, VN, Q, 200, 20, 5, 0.1, 0.1)
 
     ps.init()
     ps.register_surface_mesh("mesh", V, F)
-    for i in range(len(strokes)):
-        stroke = strokes[i]
-        ps.register_surface_mesh(f"stoke {i}", stroke[0], stroke[1])
+    ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
     ps.show()
