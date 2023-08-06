@@ -258,7 +258,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
         ts.setZero(n_steps, 3);
 
         int i = 0;
-        int fid = randi(F.rows());
+        int fid = randi(F.rows() - 1);
         double variation = randd() * delta;
 
         Eigen::RowVector3d bary_coord;
@@ -269,7 +269,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
         vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
         random_tangent(&q, n);
 
-        for (i = 0; i < n_steps; i++) {
+        for (; i < n_steps; i++) {
           vertex_weighted_position(&o, bary_coord, fid, F, V);
           o += (offset + variation) * n;
 
@@ -302,6 +302,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   VC_stroke.setZero(2 * total_valid, 3);
   F_stroke.setZero(2 * (total_valid - n_lines), 3);
 
+  int tail_steps = static_cast<int>(2.0 * interval_factor);
   int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
@@ -314,8 +315,17 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
       Eigen::RowVector3d pos = positions[idx]->row(i);
       Eigen::RowVector3d t = bitangents[idx]->row(i);
 
-      V_stroke.row(base + 2 * i) = pos + line_width * t;
-      V_stroke.row(base + 2 * i + 1) = pos - line_width * t;
+      double w_scale_lower =
+          std::sqrt(i > tail_steps ? 1 : i / static_cast<double>(tail_steps));
+      double w_scale_upper =
+          std::sqrt((n_valid - i) > tail_steps
+                        ? 1
+                        : (n_valid - i) / static_cast<double>(tail_steps));
+      double w_scale =
+          w_scale_lower < w_scale_upper ? w_scale_lower : w_scale_upper;
+
+      V_stroke.row(base + 2 * i) = pos + w_scale * line_width * t;
+      V_stroke.row(base + 2 * i + 1) = pos - w_scale * line_width * t;
 
       VC_stroke.row(base + 2 * i) = color;
       VC_stroke.row(base + 2 * i + 1) = color;
