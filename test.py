@@ -10,12 +10,11 @@ if __name__ == '__main__':
     VN = np.load('test_data/VN.npy')
     Q = np.load('test_data/Q.npy')
 
-    res = flow_lines.trace(V, F, VN, Q)
+    strokes = flow_lines.trace(V, F, VN, Q, 20, 100)
 
     ps.init()
-    mesh_vis = ps.register_surface_mesh("mesh", V, F)
-    mesh_vis.add_vector_quantity("VN", VN, enabled=True)
-    mesh_vis.add_vector_quantity("Q", Q, enabled=True)
-    trace_vis = ps.register_point_cloud("trace", res[0])
-    trace_vis.add_vector_quantity("q", res[1], enabled=True)
+    ps.register_surface_mesh("mesh", V, F)
+    for i in range(len(strokes)):
+        stroke = strokes[i]
+        ps.register_surface_mesh(f"stoke {i}", stroke[0], stroke[1])
     ps.show()

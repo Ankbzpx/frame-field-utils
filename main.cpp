@@ -194,54 +194,97 @@ void compact_tangent(Eigen::RowVector3d* q, const Eigen::RowVector3d& n,
 py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
                           Eigen::Ref<const RowMatrixXi> F,
                           Eigen::Ref<const RowMatrixXd> VN,
-                          Eigen::Ref<const RowMatrixXd> Q) {
-  std::cout << "trace_flow_lines" << std::endl;
-
+                          Eigen::Ref<const RowMatrixXd> Q, int n_steps,
+                          int n_lines) {
   double avg_edge_length = igl::avg_edge_length(V, F);
   double step_size = avg_edge_length / 2.0;
-  int n_steps = 20;
-  double offset = avg_edge_length / 10.0;
+  double offset = avg_edge_length / 5.0;
+  double line_width = avg_edge_length / 10.0;
+  double variation = avg_edge_length / 20.0;
 
   igl::embree::EmbreeIntersector intersector;
   intersector.init(V.cast<float>(), F.cast<int>(), true);
 
+  std::vector<std::unique_ptr<RowMatrixXd>> positions, bitangents;
+  std::vector<int> valid_steps;
+
+  positions.resize(n_lines);
+  bitangents.resize(n_lines);
+  valid_steps.resize(n_lines);
+
+  igl::parallel_for(
+      n_lines,
+      [&](int idx) {
+        RowMatrixXd os, ts;
+        os.setZero(n_steps, 3);
+        ts.setZero(n_steps, 3);
+
+        int i = 0;
+        int fid = randi(F.rows());
+
+        Eigen::RowVector3d bary_coord;
+        random_point_in_triangle(&bary_coord);
+
+        Eigen::RowVector3d n, q, o;
+        vertex_weighted_normal(&n, bary_coord, fid, F, VN);
+        vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
+        random_tangent(&q, n);
+
+        for (i = 0; i < n_steps; i++) {
+          vertex_weighted_position(&o, bary_coord, fid, F, V);
+          o += (offset + randd() * variation) * n;
+
+          // Record traced position
+          os.row(i) = o;
+          ts.row(i) = n.cross(q);
+
+          fid = trace_step(&bary_coord, o, q, n, intersector, step_size);
+          if (fid < 0) {
+            break;
+          }
+          vertex_weighted_normal(&n, bary_coord, fid, F, VN);
+          project_tangent(&q, n);
+          compact_tangent(&q, n, bary_coord, fid, F, VN, Q);
+        }
+
+        positions[idx] = std::make_unique<RowMatrixXd>(os);
+        bitangents[idx] = std::make_unique<RowMatrixXd>(ts);
+        valid_steps[idx] = i;
+      },
+      1000);
+
   py::list return_list;
+  for (size_t idx = 0; idx < n_lines; idx++) {
+    int n_valid = valid_steps[idx];
+    RowMatrixXd V_stroke;
+    RowMatrixXi F_stroke;
 
-  RowMatrixXd os, qs;
-  os.setZero(n_steps, 3);
-  qs.setZero(n_steps, 3);
+    V_stroke.setZero(2 * n_valid, 3);
+    F_stroke.setZero(2 * (n_valid - 1), 3);
 
-  // Debug
-  int fid = randi(F.rows());
+    for (size_t i = 0; i < n_valid; i++) {
+      Eigen::RowVector3d pos = positions[idx]->row(i);
+      Eigen::RowVector3d t = bitangents[idx]->row(i);
 
-  Eigen::RowVector3d bary_coord;
-  random_point_in_triangle(&bary_coord);
+      V_stroke.row(2 * i) = pos + line_width * t;
+      V_stroke.row(2 * i + 1) = pos - line_width * t;
 
-  Eigen::RowVector3d n, q, o;
-  vertex_weighted_normal(&n, bary_coord, fid, F, VN);
-  vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
-  random_tangent(&q, n);
+      if (i != n_valid - 1) {
+        int v0 = 2 * i;
+        int v1 = 2 * i + 1;
 
-  for (size_t i = 0; i < n_steps; i++) {
-    vertex_weighted_position(&o, bary_coord, fid, F, V);
-    o += offset * n;
+        int v2 = 2 * (i + 1);
+        int v3 = 2 * (i + 1) + 1;
 
-    // Record traced position
-    os.row(i) = o;
-    qs.row(i) = q;
-
-    fid = trace_step(&bary_coord, o, q, n, intersector, step_size);
-    if (fid < 0) {
-      std::cout << "Failed" << std::endl;
-      break;
+        F_stroke.row(2 * i) << v0, v1, v2;
+        F_stroke.row(2 * i + 1) << v1, v3, v2;
+      }
     }
-    vertex_weighted_normal(&n, bary_coord, fid, F, VN);
-    project_tangent(&q, n);
-    compact_tangent(&q, n, bary_coord, fid, F, VN, Q);
+    py::list stroke;
+    stroke.append(V_stroke);
+    stroke.append(F_stroke);
+    return_list.append(stroke);
   }
-
-  return_list.append(os);
-  return_list.append(qs);
 
   return return_list;
 }
