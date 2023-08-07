@@ -351,7 +351,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   return return_list;
 }
 
-PYBIND11_MODULE(flow_lines, m) {
+PYBIND11_MODULE(flow_lines_bind, m) {
   m.doc() = "Trace flow lines";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
         "Sample occlusions");
