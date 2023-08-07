@@ -12,6 +12,8 @@ if __name__ == '__main__':
 
     strokes = flow_lines.trace(V, F, VN, Q, 2000, 20, 5, 0.1, 0.025)
 
+    # exit()
+
     ps.init()
     ps.register_surface_mesh("mesh", V, F)
     strokes_vis = ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
