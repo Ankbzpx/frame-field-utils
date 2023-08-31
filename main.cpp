@@ -150,6 +150,9 @@ int trace_step(Eigen::RowVector3d *bary_coord, const Eigen::RowVector3d &o,
   bool is_hit1 =
       intersector.intersectRay(o_next.cast<float>(), -n.cast<float>(), hit1);
 
+  is_hit0 = is_hit0 && hit0.t < step_size;
+  is_hit1 = is_hit1 && hit1.t < step_size;
+
   igl::Hit *hit;
   if (is_hit0 && is_hit1) {
     if (hit0.t < hit1.t) {
@@ -214,16 +217,10 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
                           Eigen::Ref<const RowMatrixXi> F,
                           Eigen::Ref<const RowMatrixXd> VN,
                           Eigen::Ref<const RowMatrixXd> Q, int n_lines,
-                          double length_factor, double interval_factor,
-                          double offset_factor, double width_factor) {
-  double avg_edge_length = igl::avg_edge_length(V, F);
-
-  int n_steps = static_cast<int>(length_factor * interval_factor);
-  double step_size = avg_edge_length / (2.0 * interval_factor);
-
-  double offset = avg_edge_length * offset_factor;
-  double line_width = avg_edge_length * width_factor;
-  double delta = avg_edge_length * (offset_factor * 2.0);
+                          int n_steps, double line_length, double line_width,
+                          double line_offset) {
+  double step_size = line_length / n_steps;
+  double delta = line_offset;
 
   igl::embree::EmbreeIntersector intersector;
   intersector.init(V.cast<float>(), F.cast<int>(), true);
@@ -256,7 +253,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
 
         for (; i < n_steps; i++) {
           vertex_weighted_position(&o, bary_coord, fid, F, V);
-          o += (offset + variation) * n;
+          o += (line_offset + variation) * n;
 
           // Record traced position
           os.row(i) = o;
@@ -294,7 +291,7 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   color_palettes.row(3) << 174, 216, 204;
   double value_variation = 0.5;
 
-  int tail_steps = static_cast<int>(2.0 * interval_factor);
+  int n_tail_steps = static_cast<int>(n_steps / 4);
   int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
@@ -309,12 +306,12 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
       Eigen::RowVector3d pos = positions[idx]->row(i);
       Eigen::RowVector3d t = bitangents[idx]->row(i);
 
-      double w_scale_lower =
-          std::sqrt(i > tail_steps ? 1 : i / static_cast<double>(tail_steps));
+      double w_scale_lower = std::sqrt(
+          i > n_tail_steps ? 1 : i / static_cast<double>(n_tail_steps));
       double w_scale_upper =
-          std::sqrt((n_valid - i) > tail_steps
+          std::sqrt((n_valid - i) > n_tail_steps
                         ? 1
-                        : (n_valid - i) / static_cast<double>(tail_steps));
+                        : (n_valid - i) / static_cast<double>(n_tail_steps));
       double w_scale =
           w_scale_lower < w_scale_upper ? w_scale_lower : w_scale_upper;
 
