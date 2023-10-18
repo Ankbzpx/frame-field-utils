@@ -19,7 +19,24 @@ def normalize_aabb(V):
     return V
 
 
-if __name__ == '__main__':
+def test_flowline():
+    V = np.load('test_data/V.npy')
+    F = np.load('test_data/F.npy')
+    VN = np.load('test_data/VN.npy')
+    Q = np.load('test_data/Q.npy')
+    V = normalize_aabb(V)
+
+    strokes = frame_field_utils.trace(V, F, VN, Q, 4000)
+
+    ps.init()
+    ps.register_surface_mesh("mesh", V, F)
+    strokes_vis = ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
+    strokes_vis.add_color_quantity('color', strokes[2], enabled=True)
+    ps.show()
+    ps.remove_all_structures()
+
+
+def test_tet():
     data = np.load('test_data/prism.npz')
     V = np.float64(data['V'])
     T = np.int64(data['T'])
@@ -29,8 +46,13 @@ if __name__ == '__main__':
         T)
     uE_singularity_mask = frame_field_utils.tet_edge_singularity(
         uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary.reshape(-1, 9))
-    uE_singularity_mask = uE_singularity_mask.astype(bool)
 
     ps.init()
     ps.register_curve_network('singularity', V, uE[uE_singularity_mask])
     ps.show()
+    ps.remove_all_structures()
+
+
+if __name__ == '__main__':
+    test_flowline()
+    test_tet()
