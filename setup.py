@@ -46,14 +46,14 @@ class CMakeBuild(build_ext):
 
 
 setup(
-    name="flow_lines",
+    name="frame_field_utils",
     version="0.0.1",
     author="Ruichen Zheng",
     author_email="ankbzpx@hotmail.com",
-    description="Tracing flow lines",
+    description="Some utilities from frame field",
     package_dir={'': 'src-py'},
     packages=find_packages(where="src-py"),
-    ext_modules=[CMakeExtension("flow_lines_bind")],
+    ext_modules=[CMakeExtension("frame_field_utils_bind")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
     python_requires=">=3.7",

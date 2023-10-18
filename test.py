@@ -2,8 +2,7 @@ import numpy as np
 import polyscope as ps
 from icecream import ic
 
-import flow_lines
-import flow_lines_bind
+import frame_field_utils
 
 
 def normalize_aabb(V):
@@ -26,9 +25,9 @@ if __name__ == '__main__':
     T = np.int64(data['T'])
     Rs_bary: np.array = data['Rs_bary']
 
-    uE, uE_boundary_mask, uE2T, uE2T_cumsum = flow_lines_bind.tet_edge_one_ring(
+    uE, uE_boundary_mask, uE2T, uE2T_cumsum = frame_field_utils.tet_edge_one_ring(
         T)
-    uE_singularity_mask = flow_lines_bind.tet_edge_singular(
+    uE_singularity_mask = frame_field_utils.tet_edge_singularity(
         uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary.reshape(-1, 9))
     uE_singularity_mask = uE_singularity_mask.astype(bool)
 

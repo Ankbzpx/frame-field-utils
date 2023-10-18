@@ -559,7 +559,7 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
 }
 
 Eigen::VectorXi
-tet_edge_singular(Eigen::Ref<const RowMatrixXi> uE,
+tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
                   Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
                   Eigen::Ref<const Eigen::VectorXi> uE2T,
                   Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
@@ -602,43 +602,17 @@ tet_edge_singular(Eigen::Ref<const RowMatrixXi> uE,
       },
       1000);
 
-  // for (int i = 0; i < uE.rows(); i++) {
-  //   if (uE_boundary_mask.coeff(i) == 1) {
-  //     uE_singularity_mask.coeffRef(i) = false;
-  //     continue;
-  //   }
-
-  //   RowMatrix3d m = RowMatrix3d::Identity(), transition;
-  //   for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1); j++) {
-  //     int t_i = uE2T.coeff(j);
-  //     // Here we ignore boundary singularity
-  //     int t_j = uE2T.coeff(
-  //         (j == uE2T_cumsum.coeff(i + 1) - 1) ? uE2T_cumsum.coeff(i) : j +
-  //         1);
-
-  //     const RowMatrix3d R_i =
-  //         Eigen::Map<const RowMatrix3d>(tetFrames.row(t_i).data());
-  //     const RowMatrix3d R_j =
-  //         Eigen::Map<const RowMatrix3d>(tetFrames.row(t_j).data());
-
-  //     transition_matrix(R_i, R_j, &transition);
-  //     m = transition * m;
-  //   }
-  //   bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
-  //   uE_singularity_mask.coeffRef(i) = is_singular;
-  // }
-
   return uE_singularity_mask;
 }
 
-PYBIND11_MODULE(flow_lines_bind, m) {
-  m.doc() = "Trace flow lines";
+PYBIND11_MODULE(frame_field_utils_bind, m) {
+  m.doc() = "Some utilities for frame field";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
         "Sample occlusions");
   m.def("tet_edge_one_ring", &tet_edge_one_ring,
         py::return_value_policy::reference_internal,
         "Build edge one ring data structure for tetrahedral mesh");
-  m.def("tet_edge_singular", &tet_edge_singular,
+  m.def("tet_edge_singularity", &tet_edge_singularity,
         py::return_value_policy::reference_internal,
         "Given per tet coordinate frame, compute mask of singularity for "
         "undirected edge");
