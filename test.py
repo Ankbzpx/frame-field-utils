@@ -45,7 +45,7 @@ def test_tet():
     uE, uE_boundary_mask, uE2T, uE2T_cumsum = frame_field_utils.tet_edge_one_ring(
         T)
     uE_singularity_mask = frame_field_utils.tet_edge_singularity(
-        uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary.reshape(-1, 9))
+        uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary)
 
     ps.init()
     ps.register_curve_network('singularity', V, uE[uE_singularity_mask])
