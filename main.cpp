@@ -21,6 +21,7 @@ using RowMatrixXd =
     Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using RowMatrixXi =
     Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+using RowMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
 
 // https://stackoverflow.com/questions/21237905/how-do-i-generate-thread-safe-uniform-random-numbers
 int randi(int min, int max) {
@@ -535,6 +536,101 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
   return return_list;
 }
 
+void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
+                       RowMatrix3d *m) {
+  m->setZero();
+
+  for (int j = 0; j < 3; j++) {
+    Eigen::RowVector3d dp = R_j.transpose() * R_i.col(j);
+    double val = -INFINITY;
+    int max_idx;
+    double sign;
+    for (int i = 0; i < 3; i++) {
+      double v = dp.coeff(i);
+      double v_abs = std::abs(v);
+      if (v_abs > val) {
+        val = v_abs;
+        max_idx = i;
+        sign = (v > 0.0) ? 1.0 : -1.0;
+      }
+    }
+    m->coeffRef(max_idx, j) = sign;
+  }
+}
+
+Eigen::VectorXi
+tet_edge_singular(Eigen::Ref<const RowMatrixXi> uE,
+                  Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+                  Eigen::Ref<const Eigen::VectorXi> uE2T,
+                  Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
+                  Eigen::Ref<const RowMatrixXd> tetFrames) {
+
+  assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
+  assert(uE.rows() == uE_boundary_mask.size() == uE2T_cumsum.size() - 1);
+  assert(uE2T.maxCoeff() == tetFrames.rows() - 1);
+  assert(tetFrames.cols() == 9);
+
+  Eigen::VectorXi uE_singularity_mask(uE.rows());
+
+  igl::parallel_for(
+      uE.rows(),
+      [&](int i) {
+        if (uE_boundary_mask.coeff(i) == 1) {
+          uE_singularity_mask.coeffRef(i) = false;
+        } else {
+          RowMatrix3d m = RowMatrix3d::Identity(), transition;
+          for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1);
+               j++) {
+            int t_i = uE2T.coeff(j);
+            // Here we ignore boundary singularity and always assume one ring
+            // cycle
+            int t_j = uE2T.coeff((j == uE2T_cumsum.coeff(i + 1) - 1)
+                                     ? uE2T_cumsum.coeff(i)
+                                     : j + 1);
+
+            const RowMatrix3d R_i =
+                Eigen::Map<const RowMatrix3d>(tetFrames.row(t_i).data());
+            const RowMatrix3d R_j =
+                Eigen::Map<const RowMatrix3d>(tetFrames.row(t_j).data());
+
+            transition_matrix(R_i, R_j, &transition);
+            m = transition * m;
+          }
+          bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
+          uE_singularity_mask.coeffRef(i) = is_singular;
+        }
+      },
+      1000);
+
+  // for (int i = 0; i < uE.rows(); i++) {
+  //   if (uE_boundary_mask.coeff(i) == 1) {
+  //     uE_singularity_mask.coeffRef(i) = false;
+  //     continue;
+  //   }
+
+  //   RowMatrix3d m = RowMatrix3d::Identity(), transition;
+  //   for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1); j++) {
+  //     int t_i = uE2T.coeff(j);
+  //     // Here we ignore boundary singularity
+  //     int t_j = uE2T.coeff(
+  //         (j == uE2T_cumsum.coeff(i + 1) - 1) ? uE2T_cumsum.coeff(i) : j +
+  //         1);
+
+  //     const RowMatrix3d R_i =
+  //         Eigen::Map<const RowMatrix3d>(tetFrames.row(t_i).data());
+  //     const RowMatrix3d R_j =
+  //         Eigen::Map<const RowMatrix3d>(tetFrames.row(t_j).data());
+
+  //     transition_matrix(R_i, R_j, &transition);
+  //     m = transition * m;
+  //   }
+  //   bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
+  //   uE_singularity_mask.coeffRef(i) = is_singular;
+  // }
+
+  return uE_singularity_mask;
+}
+
 PYBIND11_MODULE(flow_lines_bind, m) {
   m.doc() = "Trace flow lines";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
@@ -542,4 +638,8 @@ PYBIND11_MODULE(flow_lines_bind, m) {
   m.def("tet_edge_one_ring", &tet_edge_one_ring,
         py::return_value_policy::reference_internal,
         "Build edge one ring data structure for tetrahedral mesh");
+  m.def("tet_edge_singular", &tet_edge_singular,
+        py::return_value_policy::reference_internal,
+        "Given per tet coordinate frame, compute mask of singularity for "
+        "undirected edge");
 }

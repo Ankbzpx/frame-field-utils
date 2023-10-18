@@ -21,14 +21,17 @@ def normalize_aabb(V):
 
 
 if __name__ == '__main__':
-    data = np.load('test_data/prism_prac.npz')
+    data = np.load('test_data/prism.npz')
     V = np.float64(data['V'])
     T = np.int64(data['T'])
+    Rs_bary: np.array = data['Rs_bary']
 
     uE, uE_boundary_mask, uE2T, uE2T_cumsum = flow_lines_bind.tet_edge_one_ring(
         T)
-    uE_boundary_mask = uE_boundary_mask.astype(bool)
+    uE_singularity_mask = flow_lines_bind.tet_edge_singular(
+        uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary.reshape(-1, 9))
+    uE_singularity_mask = uE_singularity_mask.astype(bool)
 
     ps.init()
-    ps.register_curve_network('boundary', V, uE[uE_boundary_mask])
+    ps.register_curve_network('singularity', V, uE[uE_singularity_mask])
     ps.show()
