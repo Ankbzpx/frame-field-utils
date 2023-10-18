@@ -4,6 +4,7 @@
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
 #include <igl/ray_mesh_intersect.h>
+#include <igl/tet_tet_adjacency.h>
 #include <pybind11/eigen.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -12,6 +13,8 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace py = pybind11;
 using RowMatrixXd =
@@ -342,8 +345,201 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   return return_list;
 }
 
+py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
+  // Faces 0:012 1:013 2:123 3:203
+  Eigen::MatrixXi TT;
+  igl::tet_tet_adjacency(T, TT);
+
+  Eigen::MatrixXi TE(6, 2), EF(6, 2);
+  // Edges (undirected): 01 02 03 12 13 23
+  TE << 0, 1, 0, 2, 0, 3, 1, 2, 1, 3, 2, 3;
+  // Faces index in tet that is adjacent to its edge: 01 03 13 02 12 23
+  EF << 0, 1, 0, 3, 1, 3, 0, 2, 1, 2, 2, 3;
+
+  // Map edge to string for hashing
+  auto get_uEid = [](int v0, int v1) {
+    return std::to_string(v0) + "_" + std::to_string(v1);
+  };
+
+  // Max number of possible undirected edges
+  int uE_reserve_size = T.rows() * 6;
+  // Track if the edge has been marked
+  std::unordered_map<std::string, int> uE2uEid;
+  uE2uEid.reserve(uE_reserve_size);
+  // Store undirected edge vertex indices
+  std::vector<int> uE_vec;
+  uE_vec.reserve(uE_reserve_size * 2);
+  // Store adjacent tets for each undirected edge
+  std::vector<std::vector<int>> uE2T_vec_vec;
+  uE2T_vec_vec.reserve(uE_reserve_size);
+  // Store if the undirected edge is boundary
+  std::vector<int> uE_boundary_mask_vec;
+  uE_boundary_mask_vec.reserve(uE_reserve_size);
+  // Store if the adjacent tet is boundary w.r.t. current undirected edge
+  std::vector<std::vector<bool>> uE2T_boundary_vec_vec;
+  uE2T_boundary_vec_vec.reserve(uE_reserve_size);
+  // Maps each undirected edge of tet to uE_id
+  Eigen::MatrixXi E2uE(T.rows(), 6);
+  E2uE.setConstant(-1);
+  // Maps each undirected edge of tet to id of adjacent tets w.r.t. the edge
+  Eigen::MatrixXi E2T0(T.rows(), 6), E2T1(T.rows(), 6);
+  E2T0.setConstant(-1);
+  E2T1.setConstant(-1);
+  int uE_count = 0;
+
+  for (int i = 0; i < T.rows(); i++) {
+    // Each tet has 6 undirected edges
+    for (int j = 0; j < 6; j++) {
+      int i0 = TE.coeff(j, 0);
+      int i1 = TE.coeff(j, 1);
+
+      E2T0.coeffRef(i, j) = TT.coeff(i, EF.coeff(j, 0));
+      E2T1.coeffRef(i, j) = TT.coeff(i, EF.coeff(j, 1));
+
+      // If it is on boundary face
+      bool is_boundary =
+          (E2T0.coeffRef(i, j) == -1) || (E2T1.coeffRef(i, j) == -1);
+
+      int v0 = T.coeff(i, i0), v1 = T.coeff(i, i1);
+      if (v0 > v1) {
+        int tmp = v1;
+        v1 = v0;
+        v0 = tmp;
+      }
+      std::string ue_tag = get_uEid(v0, v1);
+
+      if (uE2uEid.find(ue_tag) == uE2uEid.end()) {
+        uE2uEid[ue_tag] = uE_count;
+        uE_vec.push_back(v0);
+        uE_vec.push_back(v1);
+        uE2T_vec_vec.push_back({i});
+        uE_boundary_mask_vec.push_back(is_boundary);
+        uE2T_boundary_vec_vec.push_back({is_boundary});
+        E2uE.coeffRef(i, j) = uE_count;
+        uE_count++;
+      } else {
+        int ue_id = uE2uEid[ue_tag];
+        E2uE.coeffRef(i, j) = ue_id;
+        uE2T_vec_vec[ue_id].push_back(i);
+        uE2T_boundary_vec_vec[ue_id].push_back(is_boundary);
+
+        if (is_boundary) {
+          uE_boundary_mask_vec[ue_id] = true;
+        }
+      }
+    }
+  }
+
+  RowMatrixXi uE = Eigen::Map<RowMatrixXi>(uE_vec.data(), uE_count, 2);
+  Eigen::VectorXi uE_boundary_mask =
+      Eigen::Map<Eigen::VectorXi>(uE_boundary_mask_vec.data(), uE_count);
+
+  Eigen::VectorXi uE_mark(uE_count);
+  uE_mark.setZero();
+
+  std::unordered_map<int, int> uE2T_size;
+  uE2T_size.reserve(uE_count);
+  int uE2T_size_total = 0;
+
+  // Sort one-ring
+  for (int i = 0; i < T.rows(); i++) {
+    for (int j = 0; j < 6; j++) {
+      int ue_id = E2uE.coeff(i, j);
+
+      if (uE_mark.coeff(ue_id) == 0) {
+        uE_mark.coeffRef(ue_id) = 1;
+        const std::vector<int> &T_adj = uE2T_vec_vec[ue_id];
+
+        uE2T_size[ue_id] = T_adj.size();
+        uE2T_size_total += T_adj.size();
+
+        // Since the edge is undirected, the traverse order (clockwise /
+        // counterclockwise) doesn't matter
+        if (T_adj.size() < 3) {
+          continue;
+        }
+
+        int t_id = i, t_id_end = i, t_id_boundary_first;
+        if (uE_boundary_mask.coeff(ue_id) == 1) {
+          const std::vector<bool> &T_adj_boundary =
+              uE2T_boundary_vec_vec[ue_id];
+          bool is_first_set = false;
+
+          for (int k = 0; k < T_adj.size(); k++) {
+            if (T_adj_boundary[k]) {
+              if (!is_first_set) {
+                t_id = T_adj[k];
+                t_id_boundary_first = T_adj[k];
+                is_first_set = true;
+              }
+              t_id_end = T_adj[k];
+            }
+          }
+        }
+
+        int t_id_last = -1;
+        std::vector<int> T_adj_sorted;
+        T_adj_sorted.reserve(T_adj.size());
+
+        bool finished = false;
+
+        while (!finished) {
+          int e_id = -1;
+          for (int k = 0; k < 6; k++) {
+            if (E2uE.coeff(t_id, k) == ue_id) {
+              e_id = k;
+              break;
+            }
+          }
+
+          // Next t_id
+          int t_id_ = E2T0.coeff(t_id, e_id);
+          if (t_id_ == t_id_last) {
+            t_id_ = E2T1.coeff(t_id, e_id);
+          }
+          t_id_last = t_id;
+          t_id = t_id_;
+
+          finished = (t_id == t_id_end);
+          T_adj_sorted.push_back(t_id);
+        }
+
+        if (uE_boundary_mask.coeff(ue_id) == 1) {
+          T_adj_sorted.insert(T_adj_sorted.begin(), t_id_boundary_first);
+        }
+
+        assert(T_adj.size() == T_adj_sorted.size());
+
+        uE2T_vec_vec[ue_id] = std::move(T_adj_sorted);
+      }
+    }
+  }
+
+  Eigen::VectorXi uE2T(uE2T_size_total);
+  Eigen::VectorXi uE2T_cumsum(uE_count + 1);
+  uE2T_cumsum.coeffRef(0) = 0;
+
+  for (int i = 0; i < uE_count; i++) {
+    int T_adj_size = uE2T_size[i];
+    uE2T_cumsum.coeffRef(i + 1) = uE2T_cumsum.coeff(i) + T_adj_size;
+    for (int j = 0; j < T_adj_size; j++) {
+      uE2T.coeffRef(uE2T_cumsum.coeff(i) + j) = uE2T_vec_vec[i][j];
+    }
+  }
+
+  py::list return_list;
+  return_list.append(uE);
+  return_list.append(uE_boundary_mask);
+  return_list.append(uE2T);
+  return_list.append(uE2T_cumsum);
+  return return_list;
+}
+
 PYBIND11_MODULE(flow_lines_bind, m) {
   m.doc() = "Trace flow lines";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
         "Sample occlusions");
+  m.def("tet_edge_one_ring", &tet_edge_one_ring,
+        py::return_value_policy::reference_internal,
+        "Build edge one ring data structure for tetrahedral mesh");
 }

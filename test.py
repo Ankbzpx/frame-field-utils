@@ -3,6 +3,7 @@ import polyscope as ps
 from icecream import ic
 
 import flow_lines
+import flow_lines_bind
 
 
 def normalize_aabb(V):
@@ -20,16 +21,14 @@ def normalize_aabb(V):
 
 
 if __name__ == '__main__':
-    V = np.load('test_data/V.npy')
-    F = np.load('test_data/F.npy')
-    VN = np.load('test_data/VN.npy')
-    Q = np.load('test_data/Q.npy')
-    V = normalize_aabb(V)
+    data = np.load('test_data/prism_prac.npz')
+    V = np.float64(data['V'])
+    T = np.int64(data['T'])
 
-    strokes = flow_lines.trace(V, F, VN, Q, 4000)
+    uE, uE_boundary_mask, uE2T, uE2T_cumsum = flow_lines_bind.tet_edge_one_ring(
+        T)
+    uE_boundary_mask = uE_boundary_mask.astype(bool)
 
     ps.init()
-    ps.register_surface_mesh("mesh", V, F)
-    strokes_vis = ps.register_surface_mesh(f"stokes", strokes[0], strokes[1])
-    strokes_vis.add_color_quantity('color', strokes[2], enabled=True)
+    ps.register_curve_network('boundary', V, uE[uE_boundary_mask])
     ps.show()
