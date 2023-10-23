@@ -361,8 +361,12 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   // Think I can relax the requirement a little bit...
   // assert(V.rows() == T.maxCoeff() + 1);
 
-  std::vector<int> T2T_filter_vec;
-  T2T_filter_vec.reserve(T.rows());
+  std::vector<int> T_filter2T_vec;
+  Eigen::VectorXi T2T_filter(T.rows());
+  T2T_filter.setConstant(-1);
+
+  std::unordered_map<int, int> T2T_map;
+  T_filter2T_vec.reserve(T.rows());
   for (int i = 0; i < T.rows(); i++) {
     int count = 0;
     for (int j = 0; j < 4; j++) {
@@ -371,22 +375,23 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
       }
     }
     // Here we erode one vertex connected case so components can be separated by
-    // face=face adjacency
+    // face2face adjacency
     if (count > 1) {
-      T2T_filter_vec.push_back(i);
+      T2T_filter.coeffRef(i) = T_filter2T_vec.size();
+      T_filter2T_vec.push_back(i);
     }
   }
 
-  Eigen::VectorXi T2T_filter =
-      Eigen::Map<Eigen::VectorXi>(T2T_filter_vec.data(), T2T_filter_vec.size());
+  Eigen::VectorXi T_filter2T =
+      Eigen::Map<Eigen::VectorXi>(T_filter2T_vec.data(), T_filter2T_vec.size());
 
   // Filter out empty cells
   RowMatrixXi T_filter;
-  igl::slice(T, T2T_filter, 1, T_filter);
+  igl::slice(T, T_filter2T, 1, T_filter);
 
   // BFS to separate components. Reference: igl::connected_components
   Eigen::MatrixXi TT;
-  igl::tet_tet_adjacency(T_filter, TT);
+  igl::tet_tet_adjacency(T, TT);
   std::queue<int> bfs_queue;
 
   int comp_id = 0;
@@ -413,7 +418,8 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
       comp_size[comp_id] += 1;
 
       for (int j = 0; j < 4; j++) {
-        const int idx_j = TT.coeff(idx_i, j);
+        int idx_j = TT.coeff(T_filter2T.coeff(idx_i), j);
+        idx_j = (idx_j == -1) ? -1 : T2T_filter.coeff(idx_j);
         if ((idx_j != -1) && (T_comp_id.coeff(idx_j) == m)) {
           bfs_queue.push(idx_j);
         }
@@ -423,21 +429,18 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
     comp_size.push_back(0);
   }
 
+  // Sort components by tets count
   std::vector<std::pair<int, int>> comp_pair;
   for (int i = 0; i < comp_id; i++) {
     comp_pair.emplace_back(i, comp_size[i]);
   }
-
-  // Sort components by tets count
   std::sort(
       comp_pair.begin(), comp_pair.end(),
       [](const std::pair<int, int> &left, const std::pair<int, int> &right) {
         return left.second > right.second;
       });
 
-  Eigen::VectorXi V2V_comp, V2V_out;
-  RowMatrixXd V_out;
-  RowMatrixXi T_comp, T_out;
+  Eigen::VectorXi V2V_comp;
   std::unordered_map<int, int> V2V_map;
   int best_id = 0;
   double dist_min = INFINITY;
@@ -447,7 +450,6 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   for (int idx = 0; idx < comp_id_filter; idx++) {
     const int id = comp_pair[idx].first;
     V2V_comp.setZero();
-    T_comp.setZero(comp_pair[idx].second, 4);
     V2V_map.clear();
 
     std::vector<int> V2V_vec;
@@ -461,11 +463,8 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
         int vid = T_filter.coeff(i, j);
         if (V2V_map.find(vid) == V2V_map.end()) {
           V2V_map[vid] = vert_count;
-          T_comp.coeffRef(tet_count, j) = vert_count;
           vert_count++;
           V2V_vec.push_back(vid);
-        } else {
-          T_comp.coeffRef(tet_count, j) = V2V_map[vid];
         }
       }
       tet_count++;
@@ -477,49 +476,42 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
     igl::slice(V, V2V_comp, 1, V_comp);
     igl::slice(VN, V2V_comp, 1, VN_comp);
     VN_comp.rowwise().normalize();
-    Eigen::RowVector3d barycenter = V_comp.rowwise().mean();
-    RowMatrixXd dirs = (V_comp.rowwise() - barycenter).normalized();
+    Eigen::RowVector3d masscenter = V_comp.rowwise().mean();
+    RowMatrixXd dirs = (V_comp.rowwise() - masscenter).normalized();
     Eigen::VectorXd dps = (VN_comp.array() * dirs.array()).rowwise().sum();
 
     // Pure heuristic
     double dist = ((dps.array() > 0).count() > vert_count / 2)
-                      ? barycenter.norm()
+                      ? masscenter.norm()
                       : INFINITY;
 
     if (dist < dist_min) {
       dist_min = dist;
       best_id = id;
-      // I believe I don't need std::move here, as Eigen should handle those
-      // internally
-      T_out = T_comp;
-      V_out = V_comp;
-      V2V_out = V2V_comp;
     }
   }
 
-  // We need to fill back excluded boundary
+  // We need to fill back eroded boundary
   Eigen::VectorXi T_fill_id(T.rows());
   T_fill_id.setConstant(comp_id);
   for (int i = 0; i < T_filter.rows(); i++) {
-    T_fill_id.coeffRef(T2T_filter.coeff(i)) = T_comp_id.coeff(i);
+    T_fill_id.coeffRef(T_filter2T.coeff(i)) = T_comp_id.coeff(i);
   }
 
+  // Just pick a random one
   int start_t_id = 0;
   for (int i = 0; i < T_comp_id.rows(); i++) {
     if (T_comp_id.coeff(i) == best_id) {
-      // Just pick a random one
-      start_t_id = T2T_filter.coeff(i);
+      start_t_id = T_filter2T.coeff(i);
       break;
     }
   }
-  // FIXME: This could be expensive. Merge with above one
-  igl::tet_tet_adjacency(T, TT);
   std::queue<int> fill_queue;
   fill_queue.push(start_t_id);
 
-  Eigen::VectorXi T_fill_mark(T.rows());
-  T_fill_mark.setZero();
-  T_fill_mark.coeffRef(start_t_id) = 1;
+  Eigen::Array<bool, Eigen::Dynamic, 1> T_fill_mask(T.rows());
+  T_fill_mask.setZero();
+  T_fill_mask.coeffRef(start_t_id) = true;
 
   while (!fill_queue.empty()) {
     const int idx_i = fill_queue.front();
@@ -527,7 +519,7 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
     for (int j = 0; j < 4; j++) {
       const int idx_j = TT.coeff(idx_i, j);
 
-      if (idx_j == -1 || (T_fill_mark.coeff(idx_j) == 1)) {
+      if (idx_j == -1 || (T_fill_mask.coeff(idx_j))) {
         continue;
       }
 
@@ -541,20 +533,43 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
         }
       }
 
-      bool filling_comp = (T_fill_id.coeff(idx_j) == comp_id) && (count > 0);
-
-      if (target_comp || filling_comp) {
+      // If it belongs to previously eroded component
+      bool erode_comp = (T_fill_id.coeff(idx_j) == comp_id) && (count > 0);
+      if (target_comp || erode_comp) {
         fill_queue.push(idx_j);
-        T_fill_mark.coeffRef(idx_j) = 1;
+        T_fill_mask.coeffRef(idx_j) = true;
       }
     }
   }
 
+  // Filter unreference vertices, and compute a index such that V[V2V] = V_out
+  RowMatrixXi T_fill, T_out;
+  igl::slice_mask(T, T_fill_mask, 1, T_fill);
+  T_out.setZero(T_fill.rows(), 4);
+
+  RowMatrixXd V_out;
+  std::vector<int> V2V_vec;
+  int vert_count = 0;
+  V2V_map.clear();
+  for (int i = 0; i < T_fill.rows(); i++) {
+    for (int j = 0; j < 4; j++) {
+      int vid = T_fill.coeff(i, j);
+      if (V2V_map.find(vid) == V2V_map.end()) {
+        V2V_map[vid] = vert_count;
+        T_out.coeffRef(i, j) = vert_count;
+        vert_count++;
+        V2V_vec.push_back(vid);
+      } else {
+        T_out.coeffRef(i, j) = V2V_map[vid];
+      }
+    }
+  }
+  Eigen::VectorXi V2V = Eigen::Map<Eigen::VectorXi>(V2V_vec.data(), vert_count);
+
   py::list return_list;
   return_list.append(V_out);
   return_list.append(T_out);
-  return_list.append(V2V_out);
-  return_list.append(T_fill_mark);
+  return_list.append(V2V);
   return return_list;
 }
 
