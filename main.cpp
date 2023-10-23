@@ -4,6 +4,8 @@
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
 #include <igl/ray_mesh_intersect.h>
+#include <igl/slice.h>
+#include <igl/slice_mask.h>
 #include <igl/tet_tet_adjacency.h>
 #include <pybind11/eigen.h>
 #include <pybind11/numpy.h>
@@ -11,6 +13,7 @@
 
 #include <iostream>
 #include <limits>
+#include <queue>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -22,6 +25,8 @@ using RowMatrixXd =
 using RowMatrixXi =
     Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using RowMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
+
+constexpr int kMinParallelSize = 1000;
 
 // https://stackoverflow.com/questions/21237905/how-do-i-generate-thread-safe-uniform-random-numbers
 int randi(int min, int max) {
@@ -188,7 +193,7 @@ void compact_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n,
   double best_dp = -std::numeric_limits<double>::infinity();
 
   for (size_t i = 0; i < 4; i++) {
-    double dp = qp.dot(*q);
+    const double dp = qp.dot(*q);
     if (dp > best_dp) {
       best_dp = dp;
       best_qp = qp;
@@ -205,7 +210,7 @@ float rgb_to_intensity(const Eigen::RowVector3d &rgb) {
 }
 
 int random_color_idx() {
-  double sample = randd();
+  const double sample = randd();
   if (sample < 0.6) {
     return 0;
   } else if (sample < 0.75) {
@@ -295,14 +300,14 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   color_palettes.row(3) << 174, 216, 204;
   double value_variation = 0.5;
 
-  int n_tail_steps = static_cast<int>(n_steps / 4);
+  const int n_tail_steps = static_cast<int>(n_steps / 4);
   int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
 
     Eigen::RowVector3d color = color_palettes.row(random_color_idx());
-    double intensity = rgb_to_intensity(color);
-    double intensity_new =
+    const double intensity = rgb_to_intensity(color);
+    const double intensity_new =
         intensity + value_variation * intensity * (2 * randd() - 1);
     color *= intensity_new / intensity / 255.0;
 
@@ -310,13 +315,13 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
       Eigen::RowVector3d pos = positions[idx]->row(i);
       Eigen::RowVector3d t = bitangents[idx]->row(i);
 
-      double w_scale_lower = std::sqrt(
+      const double w_scale_lower = std::sqrt(
           i > n_tail_steps ? 1 : i / static_cast<double>(n_tail_steps));
-      double w_scale_upper =
+      const double w_scale_upper =
           std::sqrt((n_valid - i) > n_tail_steps
                         ? 1
                         : (n_valid - i) / static_cast<double>(n_tail_steps));
-      double w_scale =
+      const double w_scale =
           w_scale_lower < w_scale_upper ? w_scale_lower : w_scale_upper;
 
       V_stroke.row(base + 2 * i) = pos + w_scale * line_width * t;
@@ -326,11 +331,11 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
       VC_stroke.row(base + 2 * i + 1) = color;
 
       if (i != n_valid - 1) {
-        int v0 = base + 2 * i;
-        int v1 = base + 2 * i + 1;
+        const int v0 = base + 2 * i;
+        const int v1 = base + 2 * i + 1;
 
-        int v2 = base + 2 * (i + 1);
-        int v3 = base + 2 * (i + 1) + 1;
+        const int v2 = base + 2 * (i + 1);
+        const int v3 = base + 2 * (i + 1) + 1;
 
         F_stroke.row(base - 2 * idx + 2 * i) << v0, v1, v2;
         F_stroke.row(base - 2 * idx + 2 * i + 1) << v1, v3, v2;
@@ -343,6 +348,151 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   return_list.append(V_stroke);
   return_list.append(F_stroke);
   return_list.append(VC_stroke);
+  return return_list;
+}
+
+py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
+                    Eigen::Ref<const RowMatrixXd> VN,
+                    Eigen::Ref<const Eigen::VectorXi> V_mask,
+                    Eigen::Ref<const RowMatrixXi> T) {
+
+  assert(V.rows() == VN.rows() == V_mask.size());
+  assert(T.cols() == 4);
+  // Think I can relax the requirement a little bit...
+  // assert(V.rows() == T.maxCoeff() + 1);
+
+  Eigen::Array<bool, Eigen::Dynamic, 1> T_mask(T.rows());
+  igl::parallel_for(
+      T.rows(),
+      [&](int i) {
+        int count = 0;
+        for (int j = 0; j < 4; j++) {
+          if (V_mask.coeff(T.coeff(i, j)) == 1) {
+            count += 1;
+          }
+          T_mask.coeffRef(i) = count > 1;
+        }
+      },
+      kMinParallelSize);
+
+  RowMatrixXi T_filter;
+  igl::slice_mask(T, T_mask, 1, T_filter);
+
+  // BFS to separate components. Reference: igl::connected_components
+  Eigen::MatrixXi TT;
+  igl::tet_tet_adjacency(T_filter, TT);
+  std::queue<int> bfs_queue;
+
+  int comp_id = 0;
+  std::vector<int> comp_size = {0};
+  int m = T_filter.maxCoeff();
+  Eigen::VectorXi T_comp_id(T_filter.rows());
+  T_comp_id.setConstant(m);
+
+  for (int i = 0; i < T_filter.rows(); i++) {
+    if (T_comp_id.coeff(i) < m) {
+      continue;
+    }
+
+    bfs_queue.push(i);
+
+    while (!bfs_queue.empty()) {
+      const int idx_i = bfs_queue.front();
+      bfs_queue.pop();
+
+      if (T_comp_id.coeff(idx_i) < m) {
+        continue;
+      }
+      T_comp_id.coeffRef(idx_i) = comp_id;
+      comp_size[comp_id] += 1;
+
+      for (int j = 0; j < 4; j++) {
+        const int idx_j = TT.coeff(idx_i, j);
+        if ((idx_j != -1) && (T_comp_id.coeff(idx_j) == m)) {
+          bfs_queue.push(idx_j);
+        }
+      }
+    }
+    comp_id++;
+    comp_size.push_back(0);
+  }
+
+  std::vector<std::pair<int, int>> comp_pair;
+  for (int i = 0; i < comp_id; i++) {
+    comp_pair.emplace_back(i, comp_size[i]);
+  }
+
+  // Sort components by tets count
+  std::sort(
+      comp_pair.begin(), comp_pair.end(),
+      [](const std::pair<int, int> &left, const std::pair<int, int> &right) {
+        return left.second > right.second;
+      });
+
+  Eigen::VectorXi V2V_comp, V2V_out;
+  RowMatrixXd V_out;
+  RowMatrixXi T_comp, T_out;
+  std::unordered_map<int, int> V2V_map;
+  int best_id = 0;
+  double dist_min = INFINITY;
+
+  // Only consider top 3
+  const int comp_id_filter = std::min(3, comp_id);
+  for (int idx = 0; idx < comp_id_filter; idx++) {
+    const int id = comp_pair[idx].first;
+    V2V_comp.setZero();
+    T_comp.setZero(comp_pair[idx].second, 4);
+    V2V_map.clear();
+
+    std::vector<int> V2V_vec;
+    int vert_count = 0, tet_count = 0;
+    for (int i = 0; i < T_filter.rows(); i++) {
+      if (T_comp_id.coeff(i) != id) {
+        continue;
+      }
+
+      for (int j = 0; j < 4; j++) {
+        int vid = T_filter.coeff(i, j);
+        if (V2V_map.find(vid) == V2V_map.end()) {
+          V2V_map[vid] = vert_count;
+          T_comp.coeffRef(tet_count, j) = vert_count;
+          vert_count++;
+          V2V_vec.push_back(vid);
+        } else {
+          T_comp.coeffRef(tet_count, j) = V2V_map[vid];
+        }
+      }
+      tet_count++;
+    }
+
+    V2V_comp = Eigen::Map<Eigen::VectorXi>(V2V_vec.data(), vert_count);
+
+    RowMatrixXd V_comp, VN_comp;
+    igl::slice(V, V2V_comp, 1, V_comp);
+    igl::slice(VN, V2V_comp, 1, VN_comp);
+    VN_comp.rowwise().normalize();
+    Eigen::RowVector3d barycenter = V_comp.rowwise().mean();
+    RowMatrixXd dirs = (V_comp.rowwise() - barycenter).normalized();
+    Eigen::VectorXd dps = (VN_comp.array() * dirs.array()).rowwise().sum();
+
+    // Pure heuristic
+    double dist = ((dps.array() > 0).count() > vert_count / 2)
+                      ? barycenter.norm()
+                      : INFINITY;
+
+    if (dist < dist_min) {
+      dist_min = dist;
+      best_id = id;
+      T_out = std::move(T_comp);
+      V_out = std::move(V_comp);
+      V2V_out = std::move(V2V_comp);
+    }
+  }
+
+  py::list return_list;
+  return_list.append(V_out);
+  return_list.append(T_out);
+  return_list.append(V2V_out);
   return return_list;
 }
 
@@ -391,14 +541,14 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
   for (int i = 0; i < T.rows(); i++) {
     // Each tet has 6 undirected edges
     for (int j = 0; j < 6; j++) {
-      int i0 = TE.coeff(j, 0);
-      int i1 = TE.coeff(j, 1);
+      const int i0 = TE.coeff(j, 0);
+      const int i1 = TE.coeff(j, 1);
 
       E2T0.coeffRef(i, j) = TT.coeff(i, EF.coeff(j, 0));
       E2T1.coeffRef(i, j) = TT.coeff(i, EF.coeff(j, 1));
 
       // If it is on boundary face
-      bool is_boundary =
+      const bool is_boundary =
           (E2T0.coeffRef(i, j) == -1) || (E2T1.coeffRef(i, j) == -1);
 
       int v0 = T.coeff(i, i0), v1 = T.coeff(i, i1);
@@ -419,7 +569,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
         E2uE.coeffRef(i, j) = uE_count;
         uE_count++;
       } else {
-        int ue_id = uE2uEid[ue_tag];
+        const int ue_id = uE2uEid[ue_tag];
         E2uE.coeffRef(i, j) = ue_id;
         uE2T_vec_vec[ue_id].push_back(i);
         uE2T_boundary_vec_vec[ue_id].push_back(is_boundary);
@@ -445,7 +595,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
   // Sort one-ring
   for (int i = 0; i < T.rows(); i++) {
     for (int j = 0; j < 6; j++) {
-      int ue_id = E2uE.coeff(i, j);
+      const int ue_id = E2uE.coeff(i, j);
 
       if (uE_mark.coeff(ue_id) == 0) {
         uE_mark.coeffRef(ue_id) = 1;
@@ -521,7 +671,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
   uE2T_cumsum.coeffRef(0) = 0;
 
   for (int i = 0; i < uE_count; i++) {
-    int T_adj_size = uE2T_size[i];
+    const int T_adj_size = uE2T_size[i];
     uE2T_cumsum.coeffRef(i + 1) = uE2T_cumsum.coeff(i) + T_adj_size;
     for (int j = 0; j < T_adj_size; j++) {
       uE2T.coeffRef(uE2T_cumsum.coeff(i) + j) = uE2T_vec_vec[i][j];
@@ -546,8 +696,8 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
     int max_idx;
     double sign;
     for (int i = 0; i < 3; i++) {
-      double v = dp.coeff(i);
-      double v_abs = std::abs(v);
+      const double v = dp.coeff(i);
+      const double v_abs = std::abs(v);
       if (v_abs > val) {
         val = v_abs;
         max_idx = i;
@@ -560,10 +710,10 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
 
 Eigen::VectorXi
 tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
-                  Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
-                  Eigen::Ref<const Eigen::VectorXi> uE2T,
-                  Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
-                  Eigen::Ref<const RowMatrixXd> tetFrames) {
+                     Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+                     Eigen::Ref<const Eigen::VectorXi> uE2T,
+                     Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
+                     Eigen::Ref<const RowMatrixXd> tetFrames) {
 
   assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
   assert(uE.rows() == uE_boundary_mask.size() == uE2T_cumsum.size() - 1);
@@ -581,12 +731,12 @@ tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
           RowMatrix3d m = RowMatrix3d::Identity(), transition;
           for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1);
                j++) {
-            int t_i = uE2T.coeff(j);
+            const int t_i = uE2T.coeff(j);
             // Here we ignore boundary singularity and always assume one ring
             // cycle
-            int t_j = uE2T.coeff((j == uE2T_cumsum.coeff(i + 1) - 1)
-                                     ? uE2T_cumsum.coeff(i)
-                                     : j + 1);
+            const int t_j = uE2T.coeff((j == uE2T_cumsum.coeff(i + 1) - 1)
+                                           ? uE2T_cumsum.coeff(i)
+                                           : j + 1);
 
             const RowMatrix3d R_i =
                 Eigen::Map<const RowMatrix3d>(tetFrames.row(t_i).data());
@@ -596,11 +746,11 @@ tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
             transition_matrix(R_i, R_j, &transition);
             m = transition * m;
           }
-          bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
+          const bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
           uE_singularity_mask.coeffRef(i) = is_singular;
         }
       },
-      1000);
+      kMinParallelSize);
 
   return uE_singularity_mask;
 }
@@ -609,6 +759,8 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.doc() = "Some utilities for frame field";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
         "Sample occlusions");
+  m.def("tet_reduce", &tet_reduce, py::return_value_policy::reference_internal,
+        "Reduce tetrahedral mesh cells by vertex mask");
   m.def("tet_edge_one_ring", &tet_edge_one_ring,
         py::return_value_policy::reference_internal,
         "Build edge one ring data structure for tetrahedral mesh");
