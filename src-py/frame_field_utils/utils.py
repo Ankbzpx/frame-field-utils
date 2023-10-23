@@ -24,3 +24,7 @@ def tet_edge_singularity(uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet):
     uE_singularity_mask = frame_field_utils_bind.tet_edge_singularity(
         uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet.reshape(-1, 9))
     return uE_singularity_mask.astype(bool)
+
+
+def tet_reduce(V, VN, V_mask, T):
+    return frame_field_utils_bind.tet_reduce(V, VN, V_mask, T)
