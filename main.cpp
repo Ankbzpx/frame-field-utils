@@ -547,7 +547,6 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   igl::slice_mask(T, T_fill_mask, 1, T_fill);
   T_out.setZero(T_fill.rows(), 4);
 
-  RowMatrixXd V_out;
   std::vector<int> V2V_vec;
   int vert_count = 0;
   V2V_map.clear();
@@ -565,6 +564,8 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
     }
   }
   Eigen::VectorXi V2V = Eigen::Map<Eigen::VectorXi>(V2V_vec.data(), vert_count);
+  RowMatrixXd V_out;
+  igl::slice(V, V2V, 1, V_out);
 
   py::list return_list;
   return_list.append(V_out);
