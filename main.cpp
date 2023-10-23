@@ -361,22 +361,28 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   // Think I can relax the requirement a little bit...
   // assert(V.rows() == T.maxCoeff() + 1);
 
-  Eigen::Array<bool, Eigen::Dynamic, 1> T_mask(T.rows());
-  igl::parallel_for(
-      T.rows(),
-      [&](int i) {
-        int count = 0;
-        for (int j = 0; j < 4; j++) {
-          if (V_mask.coeff(T.coeff(i, j)) == 1) {
-            count += 1;
-          }
-          T_mask.coeffRef(i) = count > 1;
-        }
-      },
-      kMinParallelSize);
+  std::vector<int> T2T_filter_vec;
+  T2T_filter_vec.reserve(T.rows());
+  for (int i = 0; i < T.rows(); i++) {
+    int count = 0;
+    for (int j = 0; j < 4; j++) {
+      if (V_mask.coeff(T.coeff(i, j)) == 1) {
+        count += 1;
+      }
+    }
+    // Here we erode one vertex connected case so components can be separated by
+    // face=face adjacency
+    if (count > 1) {
+      T2T_filter_vec.push_back(i);
+    }
+  }
 
+  Eigen::VectorXi T2T_filter =
+      Eigen::Map<Eigen::VectorXi>(T2T_filter_vec.data(), T2T_filter_vec.size());
+
+  // Filter out empty cells
   RowMatrixXi T_filter;
-  igl::slice_mask(T, T_mask, 1, T_filter);
+  igl::slice(T, T2T_filter, 1, T_filter);
 
   // BFS to separate components. Reference: igl::connected_components
   Eigen::MatrixXi TT;
@@ -483,9 +489,64 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
     if (dist < dist_min) {
       dist_min = dist;
       best_id = id;
-      T_out = std::move(T_comp);
-      V_out = std::move(V_comp);
-      V2V_out = std::move(V2V_comp);
+      // I believe I don't need std::move here, as Eigen should handle those
+      // internally
+      T_out = T_comp;
+      V_out = V_comp;
+      V2V_out = V2V_comp;
+    }
+  }
+
+  // We need to fill back excluded boundary
+  Eigen::VectorXi T_fill_id(T.rows());
+  T_fill_id.setConstant(comp_id);
+  for (int i = 0; i < T_filter.rows(); i++) {
+    T_fill_id.coeffRef(T2T_filter.coeff(i)) = T_comp_id.coeff(i);
+  }
+
+  int start_t_id = 0;
+  for (int i = 0; i < T_comp_id.rows(); i++) {
+    if (T_comp_id.coeff(i) == best_id) {
+      // Just pick a random one
+      start_t_id = T2T_filter.coeff(i);
+      break;
+    }
+  }
+  // FIXME: This could be expensive. Merge with above one
+  igl::tet_tet_adjacency(T, TT);
+  std::queue<int> fill_queue;
+  fill_queue.push(start_t_id);
+
+  Eigen::VectorXi T_fill_mark(T.rows());
+  T_fill_mark.setZero();
+  T_fill_mark.coeffRef(start_t_id) = 1;
+
+  while (!fill_queue.empty()) {
+    const int idx_i = fill_queue.front();
+    fill_queue.pop();
+    for (int j = 0; j < 4; j++) {
+      const int idx_j = TT.coeff(idx_i, j);
+
+      if (idx_j == -1 || (T_fill_mark.coeff(idx_j) == 1)) {
+        continue;
+      }
+
+      // If it belongs to target component
+      bool target_comp = T_fill_id.coeff(idx_j) == best_id;
+
+      int count = 0;
+      for (int k = 0; k < 4; k++) {
+        if (V_mask.coeff(T.coeff(idx_j, k)) == 1) {
+          count += 1;
+        }
+      }
+
+      bool filling_comp = (T_fill_id.coeff(idx_j) == comp_id) && (count > 0);
+
+      if (target_comp || filling_comp) {
+        fill_queue.push(idx_j);
+        T_fill_mark.coeffRef(idx_j) = 1;
+      }
     }
   }
 
@@ -493,6 +554,7 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   return_list.append(V_out);
   return_list.append(T_out);
   return_list.append(V2V_out);
+  return_list.append(T_fill_mark);
   return return_list;
 }
 
