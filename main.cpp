@@ -711,6 +711,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
         T_adj_sorted.reserve(T_adj.size());
 
         bool finished = false;
+        bool non_manifold = false;
 
         while (!finished) {
           int e_id = -1;
@@ -726,6 +727,20 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
           if (t_id_ == t_id_last) {
             t_id_ = E2T1.coeff(t_id, e_id);
           }
+          if (t_id_ == -1) {
+            non_manifold = true;
+            std::string s = "";
+            for (int k = 0; k < T_adj.size(); k++) {
+              s += std::to_string(T_adj[k]);
+              if (k != T_adj.size() - 1) {
+                s += " ";
+              }
+            }
+            std::cout << "Detect non manifold one-ring tets: " << s
+                      << ". Ignore sorting." << std::endl;
+            break;
+          }
+
           t_id_last = t_id;
           t_id = t_id_;
 
@@ -733,13 +748,17 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
           T_adj_sorted.push_back(t_id);
         }
 
-        if (uE_boundary_mask.coeff(ue_id) == 1) {
-          T_adj_sorted.insert(T_adj_sorted.begin(), t_id_boundary_first);
+        if (non_manifold) {
+          uE2T_vec_vec[ue_id] = std::move(T_adj);
+        } else {
+          if (uE_boundary_mask.coeff(ue_id) == 1) {
+            T_adj_sorted.insert(T_adj_sorted.begin(), t_id_boundary_first);
+          }
+
+          assert(T_adj.size() == T_adj_sorted.size());
+
+          uE2T_vec_vec[ue_id] = std::move(T_adj_sorted);
         }
-
-        assert(T_adj.size() == T_adj_sorted.size());
-
-        uE2T_vec_vec[ue_id] = std::move(T_adj_sorted);
       }
     }
   }
