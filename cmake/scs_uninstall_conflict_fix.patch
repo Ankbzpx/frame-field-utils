@@ -1,0 +1,13 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a074e58..1b599b7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -94,7 +94,7 @@ if(BUILD_TESTING)
+ endif()
+
+ # Add uninstall target After 'make install' can run 'make uninstall' to remove.
+-include(AddUninstallTarget)
++# include(AddUninstallTarget)
+
+ # Some variables useful for sampling the building process. Note that the GPU
+ # profile is not compiled.
