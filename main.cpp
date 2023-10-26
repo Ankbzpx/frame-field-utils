@@ -887,15 +887,17 @@ public:
       sdp_batch(&q_proj);
     } else {
       const int num_groups = num_qs / group_size;
+      const int reminder = num_qs % group_size;
+      const int loop_count = (reminder > 0) ? num_groups + 1 : num_groups;
 
       igl::parallel_for(
-          num_groups + 1,
+          loop_count,
           [&](int i) {
             const int row_start = i * group_size;
             int num_rows = group_size;
 
             if (i == num_groups) {
-              num_rows = num_qs % group_size;
+              num_rows = reminder;
             }
 
             // Don't think I am allowed to pass the block's address?
