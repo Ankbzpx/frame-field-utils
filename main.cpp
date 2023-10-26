@@ -7,6 +7,9 @@
 #include <igl/slice.h>
 #include <igl/slice_mask.h>
 #include <igl/tet_tet_adjacency.h>
+
+#include <scs.h>
+
 #include <pybind11/eigen.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -852,6 +855,128 @@ tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
   return uE_singularity_mask;
 }
 
+class SDPHelper {
+private:
+  const Eigen::VectorXd A_data_;
+  const Eigen::VectorXi A_indices_;
+  const Eigen::VectorXi A_indpter_;
+  const Eigen::VectorXd b_;
+  const Eigen::VectorXd c_base_;
+  const int m_; // number of constraints
+  const int n_; // number of variables
+  const int z_; // number of linear quality constraints
+  const int s_; // number of semidefinite cone constraints
+
+public:
+  SDPHelper() = delete;
+  SDPHelper(Eigen::Ref<const Eigen::VectorXd> A_data,
+            Eigen::Ref<const Eigen::VectorXi> A_indices,
+            Eigen::Ref<const Eigen::VectorXi> A_indpter,
+            Eigen::Ref<const Eigen::VectorXd> b,
+            Eigen::Ref<const Eigen::VectorXd> c_base, int z, int s)
+      : A_data_(A_data), A_indices_(A_indices), A_indpter_(A_indpter), b_(b),
+        c_base_(c_base), m_(b.size()), n_(c_base.size()), z_(z), s_(s) {}
+
+  RowMatrixXd solve(Eigen::Ref<const RowMatrixXd> qs, int group_size) {
+    assert(qs.cols() == s_ - 1);
+    const int num_qs = qs.rows();
+
+    RowMatrixXd q_proj = qs;
+
+    if (num_qs < group_size) {
+      sdp_batch(&q_proj);
+    } else {
+      const int num_groups = num_qs / group_size;
+
+      igl::parallel_for(
+          num_groups + 1,
+          [&](int i) {
+            const int row_start = i * group_size;
+            int num_rows = group_size;
+
+            if (i == num_groups) {
+              num_rows = num_qs % group_size;
+            }
+
+            // Don't think I am allowed to pass the block's address?
+            RowMatrixXd q_proj_block =
+                q_proj.block(row_start, 0, num_rows, s_ - 1);
+            sdp_batch(&q_proj_block);
+            q_proj.block(row_start, 0, num_rows, s_ - 1) = q_proj_block;
+          },
+          1);
+    }
+    return q_proj;
+  }
+
+  // We want explicit want copy here
+  void sdp_batch(RowMatrixXd *qs) {
+    const int num_qs = qs->rows();
+
+    // I may only need two entries to update c, but just to be safe...
+    RowMatrixXd c(num_qs, n_);
+    ScsMatrix A = {const_cast<double *>(A_data_.data()),
+                   const_cast<int *>(A_indices_.data()),
+                   const_cast<int *>(A_indpter_.data()), m_, n_};
+
+    std::unique_ptr<ScsCone> k = std::make_unique<ScsCone>();
+    std::unique_ptr<ScsData> d = std::make_unique<ScsData>();
+    std::unique_ptr<ScsSettings> stgs = std::make_unique<ScsSettings>();
+    std::unique_ptr<ScsSolution> sol = std::make_unique<ScsSolution>();
+    std::unique_ptr<ScsInfo> info = std::make_unique<ScsInfo>();
+
+    int idx = 0;
+    c.row(idx) = c_base_;
+    const auto &q = qs->row(idx);
+    c.coeffRef(idx, 0) = pow(q.norm(), 2);
+    for (int j = 0; j < s_ - 1; j++) {
+      c.coeffRef(idx, j + 1) = -2 * q.coeff(j);
+    }
+
+    d->m = m_;
+    d->n = n_;
+    d->b = const_cast<double *>(b_.data());
+    d->c = const_cast<double *>(c.row(idx).data());
+    d->A = &A;
+
+    scs_int s[1] = {s_};
+
+    k->z = z_;
+    k->s = s;
+    k->ssize = 1;
+
+    scs_set_default_settings(stgs.get());
+    stgs->eps_abs = 1e-4;
+    stgs->eps_rel = 1e-4;
+    stgs->verbose = 0;
+
+    ScsWork *scs_work = scs_init(d.get(), k.get(), stgs.get());
+    if (scs_solve(scs_work, sol.get(), info.get(), 0) == SCS_SOLVED) {
+      for (int i = 0; i < s_ - 1; ++i) {
+        qs->coeffRef(idx, i) = sol->x[i + 1];
+      }
+    }
+    idx++;
+
+    for (idx; idx < num_qs; idx++) {
+      c.row(idx) = c_base_;
+      const auto &q = qs->row(idx);
+      c.coeffRef(idx, 0) = pow(q.norm(), 2);
+      for (int j = 0; j < s_ - 1; j++) {
+        c.coeffRef(idx, j + 1) = -2 * q.coeff(j);
+      }
+      scs_update(scs_work, nullptr, const_cast<double *>(c.row(idx).data()));
+      if (scs_solve(scs_work, sol.get(), info.get(), 0) == SCS_SOLVED) {
+        for (int i = 0; i < s_ - 1; ++i) {
+          qs->coeffRef(idx, i) = sol->x[i + 1];
+        }
+      }
+    }
+
+    scs_finish(scs_work);
+  }
+};
+
 PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.doc() = "Some utilities for frame field";
   m.def("trace", &trace_flow_lines, py::return_value_policy::reference_internal,
@@ -865,4 +990,13 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
         py::return_value_policy::reference_internal,
         "Given per tet coordinate frame, compute mask of singularity for "
         "undirected edge");
+  py::class_<SDPHelper>(m, "SDPHelper")
+      .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
+                    Eigen::Ref<const Eigen::VectorXi>,
+                    Eigen::Ref<const Eigen::VectorXi>,
+                    Eigen::Ref<const Eigen::VectorXd>,
+                    Eigen::Ref<const Eigen::VectorXd>, int, int>(),
+           py::return_value_policy::reference_internal)
+      .def("solve", &SDPHelper::solve,
+           py::return_value_policy::reference_internal);
 }

@@ -1,6 +1,7 @@
 import numpy as np
 import polyscope as ps
 from icecream import ic
+import time
 
 import frame_field_utils
 
@@ -53,6 +54,23 @@ def test_tet():
     ps.remove_all_structures()
 
 
+def test_sdp():
+    num_test_samples = 300000
+    np.random.seed(0)
+    q = np.random.randn(num_test_samples, 9)
+
+    helper = frame_field_utils.SH4SDPProjectHelper()
+
+    start_time = time.time()
+    q = helper.project(q, 1024)
+    print(
+        f"Project {num_test_samples} test samples using {time.time() - start_time}s"
+    )
+
+    assert (np.linalg.norm(q, axis=-1) - 1).max() < 1e-2
+
+
 if __name__ == '__main__':
     test_flowline()
     test_tet()
+    test_sdp()
