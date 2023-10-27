@@ -32,6 +32,10 @@ def tet_comb_frame(T, TT, Rs_tet, params_tet):
                                                  params_tet).reshape(-1, 3, 3)
 
 
+def tet_uF_count(T, TT, TTi):
+    return frame_field_utils_bind.tet_uF_count(T, TT, TTi)
+
+
 def tet_frame_mismatch(T, TT, TTi, Rs_tet):
     return frame_field_utils_bind.tet_frame_mismatch(T, TT, TTi,
                                                      Rs_tet.reshape(-1, 9)) > 0

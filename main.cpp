@@ -978,6 +978,34 @@ RowMatrixXi tet_frame_mismatch(Eigen::Ref<const RowMatrixXi> T,
   return TT_mismatch;
 }
 
+int tet_uF_count(Eigen::Ref<const RowMatrixXi> T,
+                          Eigen::Ref<const RowMatrixXi> TT,
+                          Eigen::Ref<const RowMatrixXi> TTi) {
+  assert(T.rows() == TT.rows() == TTi.rows());
+  assert(T.cols() == TT.cols() == TTi.cols() == 4);
+
+  RowMatrixXi F_mark(T.rows(), 4);
+  int uF_count = 0;
+
+  for (int t_i = 0; t_i < T.rows(); t_i++) {
+    for (int j = 0; j < 4; j++) {
+      if (F_mark.coeff(t_i, j) == 1) {
+        continue;
+      }
+
+      const int t_j = TT.coeff(t_i, j);
+
+      if (t_j != -1) {
+        F_mark.coeffRef(t_j, TTi.coeff(t_i, j)) = 1;
+      }
+
+      F_mark.coeffRef(t_i, j) = 1;
+      uF_count++;
+    }
+  }
+  return uF_count;
+}
+
 class SDPHelper {
 private:
   const Eigen::VectorXd A_data_;
@@ -1121,6 +1149,9 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.def("tet_frame_mismatch", &tet_frame_mismatch,
         py::return_value_policy::reference_internal,
         "Compute mismatch for combed frame");
+  m.def("tet_uF_count", &tet_uF_count,
+        py::return_value_policy::reference_internal,
+        "Count unique faces of tetrahedral mesh");
   py::class_<SDPHelper>(m, "SDPHelper")
       .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
                     Eigen::Ref<const Eigen::VectorXi>,
