@@ -15,16 +15,26 @@ def trace(V,
                                         line_length, line_width, line_offset)
 
 
-def tet_edge_one_ring(T):
+def tet_edge_one_ring(T, TT):
     uE, uE_boundary_mask, uE2T, uE2T_cumsum = frame_field_utils_bind.tet_edge_one_ring(
-        T)
+        T, TT)
     return uE, uE_boundary_mask.astype(bool), uE2T, uE2T_cumsum
 
 
-def tet_edge_singularity(uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet):
-    uE_singularity_mask = frame_field_utils_bind.tet_edge_singularity(
+def tet_frame_singularity(uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet):
+    uE_singularity_mask = frame_field_utils_bind.tet_frame_singularity(
         uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet.reshape(-1, 9))
     return uE_singularity_mask.astype(bool)
+
+
+def tet_comb_frame(T, TT, Rs_tet, params_tet):
+    return frame_field_utils_bind.tet_comb_frame(T, TT, Rs_tet.reshape(-1, 9),
+                                                 params_tet).reshape(-1, 3, 3)
+
+
+def tet_frame_mismatch(T, TT, TTi, Rs_tet):
+    return frame_field_utils_bind.tet_frame_mismatch(T, TT, TTi,
+                                                     Rs_tet.reshape(-1, 9)) > 0
 
 
 def tet_reduce(V, VN, V_mask, T):

@@ -393,7 +393,7 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   igl::slice(T, T_filter2T, 1, T_filter);
 
   // BFS to separate components. Reference: igl::connected_components
-  Eigen::MatrixXi TT;
+  RowMatrixXi TT;
   igl::tet_tet_adjacency(T, TT);
   std::queue<int> bfs_queue;
 
@@ -577,12 +577,12 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   return return_list;
 }
 
-py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
-  // Faces 0:012 1:013 2:123 3:203
-  Eigen::MatrixXi TT;
-  igl::tet_tet_adjacency(T, TT);
+py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
+                           Eigen::Ref<const RowMatrixXi> TT) {
+  assert(T.rows() == TT.rows());
+  assert(T.cols() == TT.cols() == 4);
 
-  Eigen::MatrixXi TE(6, 2), EF(6, 2);
+  RowMatrixXi TE(6, 2), EF(6, 2);
   // Edges (undirected): 01 02 03 12 13 23
   TE << 0, 1, 0, 2, 0, 3, 1, 2, 1, 3, 2, 3;
   // Faces index in tet that is adjacent to its edge: 01 03 13 02 12 23
@@ -611,10 +611,10 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T) {
   std::vector<std::vector<bool>> uE2T_boundary_vec_vec;
   uE2T_boundary_vec_vec.reserve(uE_reserve_size);
   // Maps each undirected edge of tet to uE_id
-  Eigen::MatrixXi E2uE(T.rows(), 6);
+  RowMatrixXi E2uE(T.rows(), 6);
   E2uE.setConstant(-1);
   // Maps each undirected edge of tet to id of adjacent tets w.r.t. the edge
-  Eigen::MatrixXi E2T0(T.rows(), 6), E2T1(T.rows(), 6);
+  RowMatrixXi E2T0(T.rows(), 6), E2T1(T.rows(), 6);
   E2T0.setConstant(-1);
   E2T1.setConstant(-1);
   int uE_count = 0;
@@ -809,16 +809,16 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
 }
 
 Eigen::VectorXi
-tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
-                     Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
-                     Eigen::Ref<const Eigen::VectorXi> uE2T,
-                     Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
-                     Eigen::Ref<const RowMatrixXd> tetFrames) {
+tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
+                      Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+                      Eigen::Ref<const Eigen::VectorXi> uE2T,
+                      Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
+                      Eigen::Ref<const RowMatrixXd> T_frame) {
 
   assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
   assert(uE.rows() == uE_boundary_mask.size() == uE2T_cumsum.size() - 1);
-  assert(uE2T.maxCoeff() == tetFrames.rows() - 1);
-  assert(tetFrames.cols() == 9);
+  assert(uE2T.maxCoeff() == T_frame.rows() - 1);
+  assert(T_frame.cols() == 9);
 
   Eigen::VectorXi uE_singularity_mask(uE.rows());
 
@@ -839,9 +839,9 @@ tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
                                            : j + 1);
 
             const RowMatrix3d R_i =
-                Eigen::Map<const RowMatrix3d>(tetFrames.row(t_i).data());
+                Eigen::Map<const RowMatrix3d>(T_frame.row(t_i).data());
             const RowMatrix3d R_j =
-                Eigen::Map<const RowMatrix3d>(tetFrames.row(t_j).data());
+                Eigen::Map<const RowMatrix3d>(T_frame.row(t_j).data());
 
             transition_matrix(R_i, R_j, &transition);
             m = transition * m;
@@ -853,6 +853,129 @@ tet_edge_singularity(Eigen::Ref<const RowMatrixXi> uE,
       kMinParallelSize);
 
   return uE_singularity_mask;
+}
+
+void compatible_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
+                       RowMatrix3d *m) {
+  m->setZero();
+
+  for (int j = 0; j < 3; j++) {
+    Eigen::RowVector3d dp = R_j.transpose() * R_i.col(j);
+    double val = -INFINITY;
+    int max_idx;
+    double sign;
+    for (int i = 0; i < 3; i++) {
+      const double v = dp.coeff(i);
+      const double v_abs = std::abs(v);
+      if (v_abs > val) {
+        val = v_abs;
+        max_idx = i;
+        sign = (v > 0.0) ? 1.0 : -1.0;
+      }
+    }
+    m->col(j) = sign * R_j.col(max_idx);
+  }
+}
+
+RowMatrixXd tet_comb_frame(Eigen::Ref<const RowMatrixXi> T,
+                           Eigen::Ref<const RowMatrixXi> TT,
+                           Eigen::Ref<const RowMatrixXd> T_frame,
+                           Eigen::Ref<const RowMatrixXd> T_frame_param) {
+
+  assert(T_frame.rows() == T_frame_param.rows() == T.rows() == TT.rows());
+  assert(T.cols() == TT.cols() == 4);
+  assert(T_frame.cols() == 9);
+
+  RowMatrixXd T_frame_comb(T.rows(), 9);
+  Eigen::VectorXi T_mark(T.rows());
+  T_mark.setZero();
+
+  // Pop largest by default
+  std::priority_queue<std::pair<double, int>> mst_queue;
+  RowMatrix3d m = RowMatrix3d::Identity();
+
+  for (int i = 0; i < T.rows(); i++) {
+    if (T_mark.coeff(i) == 1) {
+      continue;
+    }
+    mst_queue.push({0.0, i});
+    T_mark.coeffRef(i) = 1;
+    T_frame_comb.row(i) = T_frame.row(i);
+
+    while (!mst_queue.empty()) {
+      auto pair = mst_queue.top();
+      const int t_i = pair.second;
+      mst_queue.pop();
+
+      const RowMatrix3d R_i =
+          Eigen::Map<const RowMatrix3d>(T_frame_comb.row(t_i).data());
+      const Eigen::RowVectorXd &params_i = T_frame_param.row(t_i);
+
+      for (int j = 0; j < 4; j++) {
+        const int t_j = TT.coeff(t_i, j);
+
+        if ((t_j == -1) || (T_mark.coeff(t_j) == 1)) {
+          continue;
+        }
+
+        const RowMatrix3d R_j =
+            Eigen::Map<const RowMatrix3d>(T_frame.row(t_j).data());
+        const Eigen::RowVectorXd &params_j = T_frame_param.row(t_j);
+
+        compatible_matrix(R_i, R_j, &m);
+        T_frame_comb.row(t_j) = Eigen::Map<Eigen::RowVectorXd>(m.data(), 9);
+
+        double smoothness = (params_j - params_i).norm();
+        mst_queue.push({1 / smoothness, t_j});
+        T_mark.coeffRef(t_j) = 1;
+      }
+    }
+  }
+
+  assert(T_mark.sum() == T.rows());
+  return T_frame_comb;
+}
+
+RowMatrixXi tet_frame_mismatch(Eigen::Ref<const RowMatrixXi> T,
+                               Eigen::Ref<const RowMatrixXi> TT,
+                               Eigen::Ref<const RowMatrixXi> TTi,
+                               Eigen::Ref<const RowMatrixXd> T_frame) {
+  assert(T_frame.rows() == T.rows() == TT.rows() == TTi.rows());
+  assert(T.cols() == TT.cols() == TTi.cols() == 4);
+  assert(T_frame.cols() == 9);
+
+  RowMatrixXi TT_mismatch(T.rows(), 4);
+  TT_mismatch.setZero();
+  RowMatrix3d m = RowMatrix3d::Identity();
+
+  for (int t_i = 0; t_i < T.rows(); t_i++) {
+    const RowMatrix3d R_i =
+        Eigen::Map<const RowMatrix3d>(T_frame.row(t_i).data());
+
+    for (int j = 0; j < 4; j++) {
+      if (TT_mismatch.coeff(t_i, j) == 1) {
+        continue;
+      }
+
+      const int t_j = TT.coeff(t_i, j);
+
+      if (t_j == -1) {
+        continue;
+      }
+
+      const RowMatrix3d R_j =
+          Eigen::Map<const RowMatrix3d>(T_frame.row(t_j).data());
+
+      transition_matrix(R_i, R_j, &m);
+      const bool mismatch = (m - RowMatrix3d::Identity()).norm() > 1e-7;
+
+      if (mismatch) {
+        TT_mismatch.coeffRef(t_i, j) = 1;
+        TT_mismatch.coeffRef(t_j, TTi.coeff(t_i, j)) = 1;
+      }
+    }
+  }
+  return TT_mismatch;
 }
 
 class SDPHelper {
@@ -988,10 +1111,16 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.def("tet_edge_one_ring", &tet_edge_one_ring,
         py::return_value_policy::reference_internal,
         "Build edge one ring data structure for tetrahedral mesh");
-  m.def("tet_edge_singularity", &tet_edge_singularity,
+  m.def("tet_frame_singularity", &tet_frame_singularity,
         py::return_value_policy::reference_internal,
         "Given per tet coordinate frame, compute mask of singularity for "
         "undirected edge");
+  m.def("tet_comb_frame", &tet_comb_frame,
+        py::return_value_policy::reference_internal,
+        "Comb frame field using minimal spanning tree");
+  m.def("tet_frame_mismatch", &tet_frame_mismatch,
+        py::return_value_policy::reference_internal,
+        "Compute mismatch for combed frame");
   py::class_<SDPHelper>(m, "SDPHelper")
       .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
                     Eigen::Ref<const Eigen::VectorXi>,
