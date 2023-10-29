@@ -16,14 +16,17 @@ def trace(V,
 
 
 def tet_edge_one_ring(T, TT):
-    uE, uE_boundary_mask, uE2T, uE2T_cumsum = frame_field_utils_bind.tet_edge_one_ring(
+    uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum, E2uE, E2T0, E2T1 = frame_field_utils_bind.tet_edge_one_ring(
         T, TT)
-    return uE, uE_boundary_mask.astype(bool), uE2T, uE2T_cumsum
+    return uE, uE_boundary_mask.astype(bool), uE_non_manifold_mask.astype(
+        bool), uE2T, uE2T_cumsum, E2uE, np.stack([E2T0, E2T1], -1)
 
 
-def tet_frame_singularity(uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet):
+def tet_frame_singularity(uE, uE_boundary_mask, uE_non_manifold_mask, uE2T,
+                          uE2T_cumsum, Rs_tet):
     uE_singularity_mask = frame_field_utils_bind.tet_frame_singularity(
-        uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_tet.reshape(-1, 9))
+        uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum,
+        Rs_tet.reshape(-1, 9))
     return uE_singularity_mask.astype(bool)
 
 
@@ -32,8 +35,15 @@ def tet_comb_frame(T, TT, Rs_tet, params_tet):
                                                  params_tet).reshape(-1, 3, 3)
 
 
-def tet_uF_count(T, TT, TTi):
-    return frame_field_utils_bind.tet_uF_count(T, TT, TTi)
+def tet_uF_map(T, TT, TTi):
+    return frame_field_utils_bind.tet_uF_map(T, TT, TTi)
+
+
+def tet_uE_uF_map(uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum,
+                  E2uE, F2uF):
+    return frame_field_utils_bind.tet_uE_uF_map(uE, uE_boundary_mask,
+                                                uE_non_manifold_mask, uE2T,
+                                                uE2T_cumsum, E2uE, F2uF)
 
 
 def tet_frame_mismatch(T, TT, TTi, Rs_tet):

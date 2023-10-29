@@ -18,6 +18,7 @@
 #include <limits>
 #include <queue>
 #include <random>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -585,7 +586,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
   RowMatrixXi TE(6, 2), EF(6, 2);
   // Edges (undirected): 01 02 03 12 13 23
   TE << 0, 1, 0, 2, 0, 3, 1, 2, 1, 3, 2, 3;
-  // Faces index in tet that is adjacent to its edge: 01 03 13 02 12 23
+  // Faces index in tet that is adjacent to edge: 01 03 13 02 12 23
   EF << 0, 1, 0, 3, 1, 3, 0, 2, 1, 2, 2, 3;
 
   // Map edge to string for hashing
@@ -665,6 +666,8 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
   RowMatrixXi uE = Eigen::Map<RowMatrixXi>(uE_vec.data(), uE_count, 2);
   Eigen::VectorXi uE_boundary_mask =
       Eigen::Map<Eigen::VectorXi>(uE_boundary_mask_vec.data(), uE_count);
+  Eigen::VectorXi uE_non_manifold_mask(uE_count);
+  uE_non_manifold_mask.setZero();
 
   Eigen::VectorXi uE_mark(uE_count);
   uE_mark.setZero();
@@ -717,6 +720,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
         bool non_manifold = false;
 
         while (!finished) {
+          // The edge id of the unique edge in tet t_id
           int e_id = -1;
           for (int k = 0; k < 6; k++) {
             if (E2uE.coeff(t_id, k) == ue_id) {
@@ -741,6 +745,7 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
             }
             std::cout << "Detect non manifold one-ring tets: " << s
                       << ". Ignore sorting." << std::endl;
+            uE_non_manifold_mask.coeffRef(ue_id) = 1;
             break;
           }
 
@@ -781,8 +786,12 @@ py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
   py::list return_list;
   return_list.append(uE);
   return_list.append(uE_boundary_mask);
+  return_list.append(uE_non_manifold_mask);
   return_list.append(uE2T);
   return_list.append(uE2T_cumsum);
+  return_list.append(E2uE);
+  return_list.append(E2T0);
+  return_list.append(E2T1);
   return return_list;
 }
 
@@ -811,12 +820,14 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
 Eigen::VectorXi
 tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
                       Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+                      Eigen::Ref<const Eigen::VectorXi> uE_non_manifold_mask,
                       Eigen::Ref<const Eigen::VectorXi> uE2T,
                       Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
                       Eigen::Ref<const RowMatrixXd> T_frame) {
 
   assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
-  assert(uE.rows() == uE_boundary_mask.size() == uE2T_cumsum.size() - 1);
+  assert(uE.rows() == uE_boundary_mask.size() == uE_non_manifold_mask.size() ==
+         uE2T_cumsum.size() - 1);
   assert(uE2T.maxCoeff() == T_frame.rows() - 1);
   assert(T_frame.cols() == 9);
 
@@ -825,15 +836,16 @@ tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
   igl::parallel_for(
       uE.rows(),
       [&](int i) {
-        if (uE_boundary_mask.coeff(i) == 1) {
+        if ((uE_boundary_mask.coeff(i) == 1) ||
+            (uE_non_manifold_mask.coeff(i) == 1)) {
+          // Ignore boundary edges or edges of non-manifold one-ring
           uE_singularity_mask.coeffRef(i) = false;
         } else {
           RowMatrix3d m = RowMatrix3d::Identity(), transition;
           for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1);
                j++) {
             const int t_i = uE2T.coeff(j);
-            // Here we ignore boundary singularity and always assume one ring
-            // cycle
+            // Here we always have one-ring cycle
             const int t_j = uE2T.coeff((j == uE2T_cumsum.coeff(i + 1) - 1)
                                            ? uE2T_cumsum.coeff(i)
                                            : j + 1);
@@ -978,32 +990,163 @@ RowMatrixXi tet_frame_mismatch(Eigen::Ref<const RowMatrixXi> T,
   return TT_mismatch;
 }
 
-int tet_uF_count(Eigen::Ref<const RowMatrixXi> T,
-                          Eigen::Ref<const RowMatrixXi> TT,
-                          Eigen::Ref<const RowMatrixXi> TTi) {
+py::list tet_uF_map(Eigen::Ref<const RowMatrixXi> T,
+                    Eigen::Ref<const RowMatrixXi> TT,
+                    Eigen::Ref<const RowMatrixXi> TTi) {
   assert(T.rows() == TT.rows() == TTi.rows());
   assert(T.cols() == TT.cols() == TTi.cols() == 4);
 
-  RowMatrixXi F_mark(T.rows(), 4);
+  RowMatrixXi F2uF(T.rows(), 4);
+  F2uF.setConstant(-1);
+
+  std::vector<int> uF2T_vec;
+  uF2T_vec.reserve(2 * T.rows());
+
   int uF_count = 0;
 
   for (int t_i = 0; t_i < T.rows(); t_i++) {
     for (int j = 0; j < 4; j++) {
-      if (F_mark.coeff(t_i, j) == 1) {
+      if (F2uF.coeff(t_i, j) != -1) {
         continue;
       }
 
       const int t_j = TT.coeff(t_i, j);
 
       if (t_j != -1) {
-        F_mark.coeffRef(t_j, TTi.coeff(t_i, j)) = 1;
+        F2uF.coeffRef(t_j, TTi.coeff(t_i, j)) = uF_count;
       }
 
-      F_mark.coeffRef(t_i, j) = 1;
+      F2uF.coeffRef(t_i, j) = uF_count;
+
+      uF2T_vec.push_back(t_i);
+      uF2T_vec.push_back(t_j);
+
       uF_count++;
     }
   }
-  return uF_count;
+
+  assert(uF2T_vec.size() == 2 * uF_count);
+
+  RowMatrixXi uF2T = Eigen::Map<RowMatrixXi>(uF2T_vec.data(), uF_count, 2);
+
+  py::list return_list;
+  return_list.append(F2uF);
+  return_list.append(uF2T);
+  return return_list;
+}
+
+py::list tet_uE_uF_map(Eigen::Ref<const RowMatrixXi> uE,
+                       Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+                       Eigen::Ref<const Eigen::VectorXi> uE_non_manifold_mask,
+                       Eigen::Ref<const Eigen::VectorXi> uE2T,
+                       Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
+                       Eigen::Ref<const RowMatrixXi> E2uE,
+                       Eigen::Ref<const RowMatrixXi> F2uF) {
+  assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
+  assert(uE.rows() == uE_boundary_mask.size() == uE_non_manifold_mask.size() ==
+         uE2T_cumsum.size() - 1);
+  assert(uE2T.maxCoeff() == E2uE.rows() - 1 == F2uF.rows() - 1);
+  assert(E2uE.cols() == 6);
+  assert(F2uF.cols() == 4);
+
+  // Faces index in tet that is adjacent to edge: 01 03 13 02 12 23
+  RowMatrixXi EF(6, 2);
+  EF << 0, 1, 0, 3, 1, 3, 0, 2, 1, 2, 2, 3;
+
+  std::vector<int> uE2uF_vec;
+  uE2uF_vec.reserve(uE2T.size() + uE_boundary_mask.sum());
+
+  Eigen::VectorXi uE2uF_cumsum(uE.rows() + 1);
+  uE2uF_cumsum.coeffRef(0) = 0;
+
+  RowMatrixXi uF2uE(F2uF.maxCoeff() + 1, 3);
+  uF2uE.setConstant(-1);
+
+  for (int i = 0; i < uE.rows(); i++) {
+    RowMatrixXi uF_adj(uE2T_cumsum.coeff(i + 1) - uE2T_cumsum.coeff(i), 2);
+    int count = 0;
+    for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1); j++) {
+      const int t_id = uE2T.coeff(j);
+
+      // The edge id of the unique edge in tet t_id
+      int e_id = -1;
+      for (int k = 0; k < 6; k++) {
+        if (E2uE.coeff(t_id, k) == i) {
+          e_id = k;
+          break;
+        }
+      }
+
+      uF_adj.coeffRef(count, 0) = F2uF.coeff(t_id, EF.coeff(e_id, 0));
+      uF_adj.coeffRef(count, 1) = F2uF.coeff(t_id, EF.coeff(e_id, 1));
+      count++;
+    }
+
+    std::vector<int> uF_vec;
+    int num_uF_adj;
+
+    // Don't think I can preallocate memory given the uncertainty of
+    // non-manifold one-ring...
+    if (uE_non_manifold_mask.coeff(i) == 1) {
+      std::set<int> uF_set;
+      for (int k = 0; k < count; k++) {
+        uF_set.insert(uF_adj.coeff(k, 0));
+        uF_set.insert(uF_adj.coeff(k, 1));
+      }
+      uF_vec = std::vector<int>(uF_set.begin(), uF_set.end());
+      num_uF_adj = uF_set.size();
+    } else {
+      num_uF_adj = (uE_boundary_mask.coeff(i) == 1) ? count + 1 : count;
+      uF_vec.resize(num_uF_adj);
+
+      int uF_id = uF_adj.coeff(0, 0);
+      if ((uF_adj.coeff(1, 0) == uF_id) || (uF_adj.coeff(1, 1) == uF_id)) {
+        uF_vec[0] = uF_adj.coeff(0, 1);
+        uF_vec[1] = uF_id;
+      } else {
+        uF_vec[0] = uF_id;
+        uF_vec[1] = uF_adj.coeff(0, 1);
+      }
+
+      for (int k = 1; k < num_uF_adj - 1; k++) {
+        const int last_uF_id = uF_vec[k];
+        int uF_id = uF_adj.coeff(k, 0);
+        uF_vec[k + 1] = uF_adj.coeff(k, 1);
+        if (uF_id != last_uF_id) {
+          uF_vec[k + 1] = uF_adj.coeff(k, 0);
+        }
+      }
+    }
+
+    for (auto uF_id : uF_vec) {
+      int k = 0;
+      for (k; k < 3; k++) {
+        if (uF2uE.coeff(uF_id, k) == -1) {
+          break;
+        }
+        if (k == 2) {
+          std::cout << "More than 3 unique edges share one unique face. "
+                       "This should never happen."
+                    << std::endl;
+        }
+      }
+      uF2uE.coeffRef(uF_id, k) = i;
+    }
+
+    uE2uF_vec.insert(uE2uF_vec.end(), uF_vec.begin(), uF_vec.end());
+    uE2uF_cumsum.coeffRef(i + 1) = uE2uF_cumsum.coeffRef(i) + num_uF_adj;
+  }
+
+  assert(uF2uE.maxCoeff() + 1 == uE.rows());
+
+  Eigen::VectorXi uE2uF =
+      Eigen::Map<Eigen::VectorXi>(uE2uF_vec.data(), uE2uF_vec.size());
+
+  py::list return_list;
+  return_list.append(uE2uF);
+  return_list.append(uE2uF_cumsum);
+  return_list.append(uF2uE);
+  return return_list;
 }
 
 class SDPHelper {
@@ -1149,9 +1292,11 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.def("tet_frame_mismatch", &tet_frame_mismatch,
         py::return_value_policy::reference_internal,
         "Compute mismatch for combed frame");
-  m.def("tet_uF_count", &tet_uF_count,
+  m.def("tet_uF_map", &tet_uF_map, py::return_value_policy::reference_internal,
+        "Build unique faces map of tetrahedral mesh");
+  m.def("tet_uE_uF_map", &tet_uE_uF_map,
         py::return_value_policy::reference_internal,
-        "Count unique faces of tetrahedral mesh");
+        "Build mapping between unique edges and unique faces");
   py::class_<SDPHelper>(m, "SDPHelper")
       .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
                     Eigen::Ref<const Eigen::VectorXi>,
