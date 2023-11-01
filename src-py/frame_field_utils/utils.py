@@ -15,6 +15,14 @@ def trace(V,
                                         line_length, line_width, line_offset)
 
 
+def vertex_tet_adjacency(T):
+    return frame_field_utils_bind.vertex_tet_adjacency(T)
+
+
+def tet_fix_index_order(V, T):
+    return frame_field_utils_bind.tet_fix_index_order(V, T)
+
+
 def tet_edge_one_ring(T, TT):
     uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum, E2uE, E2T0, E2T1 = frame_field_utils_bind.tet_edge_one_ring(
         T, TT)

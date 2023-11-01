@@ -1,5 +1,6 @@
 #include <igl/Hit.h>
 #include <igl/avg_edge_length.h>
+#include <igl/cumsum.h>
 #include <igl/embree/EmbreeIntersector.h>
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
@@ -576,6 +577,67 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
   return_list.append(T_out);
   return_list.append(V2V);
   return return_list;
+}
+
+// TODO: Follow libigl's implementation
+py::list vertex_tet_adjacency(Eigen::Ref<const RowMatrixXi> T) {
+  assert(T.cols() == 4);
+
+  std::vector<std::vector<int>> V2T_vec_vec;
+  V2T_vec_vec.resize(T.maxCoeff() + 1);
+
+  std::set<int> V_seen;
+
+  for (int i = 0; i < T.rows(); i++) {
+    for (int j = 0; j < 4; j++) {
+      int vid = T.coeff(i, j);
+      if (V_seen.find(vid) != V_seen.end()) {
+        V2T_vec_vec[vid].push_back(i);
+      } else {
+        V_seen.insert(vid);
+        V2T_vec_vec[vid] = {i};
+      }
+    }
+  }
+
+  Eigen::VectorXi V2T(T.rows() * 4);
+  Eigen::VectorXi V2T_cumsum(V2T_vec_vec.size() + 1);
+  V2T_cumsum.coeffRef(0) = 0;
+
+  for (int i = 0; i < V2T_vec_vec.size(); i++) {
+    const auto &T_adj = V2T_vec_vec[i];
+    V2T_cumsum.coeffRef(i + 1) = V2T_cumsum.coeff(i) + T_adj.size();
+    for (int j = 0; j < T_adj.size(); j++) {
+      V2T.coeffRef(V2T_cumsum.coeff(i) + j) = T_adj[j];
+    }
+  }
+
+  py::list return_list;
+  return_list.append(V2T);
+  return_list.append(V2T_cumsum);
+  return return_list;
+}
+
+RowMatrixXi tet_fix_index_order(Eigen::Ref<const RowMatrixXd> V,
+                                Eigen::Ref<const RowMatrixXi> T) {
+  RowMatrixXi T_fix = T;
+
+  igl::parallel_for(
+      T.rows(),
+      [&](int i) {
+        RowMatrix3d m;
+        m << V.row(T.coeff(i, 1)) - V.row(T.coeff(i, 0)),
+            V.row(T.coeff(i, 2)) - V.row(T.coeff(i, 0)),
+            V.row(T.coeff(i, 3)) - V.row(T.coeff(i, 0));
+
+        if (m.determinant() < 0) {
+          T_fix.row(i) << T.coeff(i, 0), T.coeff(i, 1), T.coeff(i, 3),
+              T.coeff(i, 2);
+        }
+      },
+      kMinParallelSize);
+
+  return T_fix;
 }
 
 py::list tet_edge_one_ring(Eigen::Ref<const RowMatrixXi> T,
@@ -1279,6 +1341,12 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
         "Sample occlusions");
   m.def("tet_reduce", &tet_reduce, py::return_value_policy::reference_internal,
         "Reduce tetrahedral mesh cells by vertex mask");
+  m.def("vertex_tet_adjacency", &vertex_tet_adjacency,
+        py::return_value_policy::reference_internal,
+        "Vertex tet adjacency list");
+  m.def("tet_fix_index_order", &tet_fix_index_order,
+        py::return_value_policy::reference_internal,
+        "Fix index order such that |v1 - v0, v2 - v0, v3 - v0| > 0");
   m.def("tet_edge_one_ring", &tet_edge_one_ring,
         py::return_value_policy::reference_internal,
         "Build edge one ring data structure for tetrahedral mesh");
