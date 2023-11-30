@@ -3,6 +3,7 @@ import polyscope as ps
 from icecream import ic
 import time
 
+import igl
 import frame_field_utils
 
 
@@ -43,10 +44,11 @@ def test_tet():
     T = np.int64(data['T'])
     Rs_bary: np.array = data['Rs_bary']
 
-    uE, uE_boundary_mask, uE2T, uE2T_cumsum = frame_field_utils.tet_edge_one_ring(
-        T)
-    uE_singularity_mask = frame_field_utils.tet_edge_singularity(
-        uE, uE_boundary_mask, uE2T, uE2T_cumsum, Rs_bary)
+    TT, _ = igl.tet_tet_adjacency(T)
+    uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum, E2uE, E2T = frame_field_utils.tet_edge_one_ring(
+        T, TT)
+    uE_singularity_mask = frame_field_utils.tet_frame_singularity(
+        uE, uE_boundary_mask, uE_non_manifold_mask, uE2T, uE2T_cumsum, Rs_bary)
 
     ps.init()
     ps.register_curve_network('singularity', V, uE[uE_singularity_mask])
