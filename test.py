@@ -72,7 +72,31 @@ def test_sdp():
     assert (np.linalg.norm(q, axis=-1) - 1).max() < 1e-2
 
 
+def test_dc():
+    sdf = lambda x: np.linalg.norm(x) - 0.5
+    sdf_grad = lambda x: x
+
+    min_corner = np.array([-1.0, -1.0, -1.0])
+    max_corner = np.array([1.0, 1.0, 1.0])
+    grid_res = 16
+
+    V, F = frame_field_utils.dual_contouring_serial(sdf,
+                                                    sdf_grad,
+                                                    min_corner,
+                                                    max_corner,
+                                                    grid_res,
+                                                    grid_res,
+                                                    grid_res,
+                                                    triangles=True)
+
+    ps.init()
+    ps.register_surface_mesh('mesh', V, F)
+    ps.show()
+    ps.remove_all_structures()
+
+
 if __name__ == '__main__':
     test_flowline()
     test_tet()
     test_sdp()
+    test_dc()

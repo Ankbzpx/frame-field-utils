@@ -1,0 +1,13 @@
+diff --git a/include/igl/dual_contouring.cpp b/include/igl/dual_contouring.cpp
+index f15d4ca9..f75c6651 100644
+--- a/include/igl/dual_contouring.cpp
++++ b/include/igl/dual_contouring.cpp
+@@ -355,7 +355,7 @@ namespace igl
+               }
+             }
+           }
+-        },10ul);
++        },SIZE_MAX);
+         dual_vertex_positions();
+       }
+       template <typename DerivedGf, typename DerivedGV>

@@ -63,6 +63,21 @@ def tet_reduce(V, VN, V_mask, T):
     return frame_field_utils_bind.tet_reduce(V, VN, V_mask, T)
 
 
+def dual_contouring_serial(f,
+                           f_grad,
+                           min_corner,
+                           max_corner,
+                           nx,
+                           ny,
+                           nz,
+                           constrained=False,
+                           triangles=False,
+                           root_finding=True):
+    return frame_field_utils_bind.dual_contouring_serial(
+        f, f_grad, min_corner, max_corner, nx, ny, nz, constrained, triangles,
+        root_finding)
+
+
 class SH4SDPProjectHelper:
 
     def __init__(self):

@@ -1,6 +1,7 @@
 #include <igl/Hit.h>
 #include <igl/avg_edge_length.h>
 #include <igl/cumsum.h>
+#include <igl/dual_contouring.h>
 #include <igl/embree/EmbreeIntersector.h>
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
@@ -8,12 +9,12 @@
 #include <igl/slice.h>
 #include <igl/slice_mask.h>
 #include <igl/tet_tet_adjacency.h>
-
-#include <scs.h>
-
 #include <pybind11/eigen.h>
+#include <pybind11/functional.h>
+#include <pybind11/gil.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <scs.h>
 
 #include <iostream>
 #include <limits>
@@ -360,7 +361,6 @@ py::list tet_reduce(Eigen::Ref<const RowMatrixXd> V,
                     Eigen::Ref<const RowMatrixXd> VN,
                     Eigen::Ref<const Eigen::VectorXi> V_mask,
                     Eigen::Ref<const RowMatrixXi> T) {
-
   assert(V.rows() == VN.rows() == V_mask.size());
   assert(T.cols() == 4);
   // Think I can relax the requirement a little bit...
@@ -886,7 +886,6 @@ tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
                       Eigen::Ref<const Eigen::VectorXi> uE2T,
                       Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
                       Eigen::Ref<const RowMatrixXd> T_frame) {
-
   assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
   assert(uE.rows() == uE_boundary_mask.size() == uE_non_manifold_mask.size() ==
          uE2T_cumsum.size() - 1);
@@ -955,7 +954,6 @@ RowMatrixXd tet_comb_frame(Eigen::Ref<const RowMatrixXi> T,
                            Eigen::Ref<const RowMatrixXi> TT,
                            Eigen::Ref<const RowMatrixXd> T_frame,
                            Eigen::Ref<const RowMatrixXd> T_frame_param) {
-
   assert(T_frame.rows() == T_frame_param.rows() == T.rows() == TT.rows());
   assert(T.cols() == TT.cols() == 4);
   assert(T_frame.cols() == 9);
@@ -1211,6 +1209,34 @@ py::list tet_uE_uF_map(Eigen::Ref<const RowMatrixXi> uE,
   return return_list;
 }
 
+py::list dual_contouring_serial(py::function f, py::function f_grad,
+                                Eigen::Ref<const Eigen::RowVector3d> min_corner,
+                                Eigen::Ref<const Eigen::RowVector3d> max_corner,
+                                int nx, int ny, int nz, bool constrained,
+                                bool triangles, bool root_finding) {
+  // FIXME: I think I need the `py::gil_scoped_acquire accquire` if I want to
+  //  use `igl::parallel_for`. But it would stuck, possibly never have released
+  //  it? Currently disable `igl::parallel_for` as a workaround
+  auto f_ = [&](const Eigen::RowVector3d &v) -> double {
+    return f(v).cast<double>();
+  };
+  auto f_grad_ = [f_grad](const Eigen::RowVector3d &v) {
+    return f_grad(v).cast<Eigen::RowVector3d>().normalized();
+  };
+
+  RowMatrixXd V;
+  RowMatrixXi Q;
+
+  igl::dual_contouring(f_, f_grad_, Eigen::RowVector3d(min_corner),
+                       Eigen::RowVector3d(max_corner), nx, ny, nz, constrained,
+                       triangles, root_finding, V, Q);
+
+  py::list return_list;
+  return_list.append(V);
+  return_list.append(Q);
+  return return_list;
+}
+
 class SDPHelper {
 private:
   const Eigen::VectorXd A_data_;
@@ -1365,6 +1391,11 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
   m.def("tet_uE_uF_map", &tet_uE_uF_map,
         py::return_value_policy::reference_internal,
         "Build mapping between unique edges and unique faces");
+  m.def("dual_contouring_serial", &dual_contouring_serial,
+        py::return_value_policy::reference_internal,
+        "Compromised wrap of igl::dual_contouring. Allow passing python "
+        "functions but currently only work in serial. Put it here for future "
+        "reference.");
   py::class_<SDPHelper>(m, "SDPHelper")
       .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
                     Eigen::Ref<const Eigen::VectorXi>,
