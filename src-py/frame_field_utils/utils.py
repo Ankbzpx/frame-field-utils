@@ -78,6 +78,17 @@ def dual_contouring_serial(f,
         root_finding)
 
 
+def miq(V,
+        F,
+        Q,
+        gradient_size=50,
+        stiffness_iter=5,
+        stiffness=5.0,
+        direct_round=False):
+    return frame_field_utils_bind.miq(V, F, Q, gradient_size, stiffness_iter,
+                                      stiffness, direct_round)
+
+
 class SH4SDPProjectHelper:
 
     def __init__(self):

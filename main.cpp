@@ -1,11 +1,21 @@
 #include <igl/Hit.h>
+#include <igl/PI.h>
 #include <igl/avg_edge_length.h>
+#include <igl/comb_cross_field.h>
+#include <igl/comb_frame_field.h>
+#include <igl/compute_frame_field_bisectors.h>
+#include <igl/copyleft/comiso/miq.h>
+#include <igl/cross_field_mismatch.h>
 #include <igl/cumsum.h>
+#include <igl/cut_mesh_from_singularities.h>
 #include <igl/dual_contouring.h>
 #include <igl/embree/EmbreeIntersector.h>
+#include <igl/find_cross_field_singularities.h>
+#include <igl/local_basis.h>
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
 #include <igl/ray_mesh_intersect.h>
+#include <igl/rotate_vectors.h>
 #include <igl/slice.h>
 #include <igl/slice_mask.h>
 #include <igl/tet_tet_adjacency.h>
@@ -1237,6 +1247,68 @@ py::list dual_contouring_serial(py::function f, py::function f_grad,
   return return_list;
 }
 
+// Copied from:
+// https://github.com/libigl/libigl/blob/main/tutorial/505_MIQ/main.cpp
+py::list miq(Eigen::Ref<const RowMatrixXd> V, Eigen::Ref<const RowMatrixXi> F,
+             Eigen::Ref<const RowMatrixXd> X, double gradient_size, double iter,
+             double stiffness, bool direct_round) {
+  assert(X.rows() == F.rows());
+
+  // Workaround DerivedV. Not sure if it would result in copying. Worry about it
+  // later...
+  const Eigen::MatrixXd &V_ref = V, X1 = X;
+  const Eigen::MatrixXi &F_ref = F;
+
+  // Find the orthogonal vector
+  Eigen::MatrixXd B1, B2, B3, BIS1, BIS2, BIS1_combed, BIS2_combed, X1_combed,
+      X2_combed;
+  // Per-corner, integer mismatches
+  Eigen::Matrix<int, Eigen::Dynamic, 3> MMatch;
+  // Field singularities
+  Eigen::Matrix<int, Eigen::Dynamic, 1> isSingularity, singularityIndex;
+
+  // Per corner seams
+  Eigen::Matrix<int, Eigen::Dynamic, 3> Seams;
+  igl::local_basis(V_ref, F_ref, B1, B2, B3);
+
+  Eigen::MatrixXd X2 = igl::rotate_vectors(
+      X1, Eigen::VectorXd::Constant(1, igl::PI / 2), B1, B2);
+
+  // Always work on the bisectors, it is more general
+  igl::compute_frame_field_bisectors(V_ref, F_ref, X1, X2, BIS1, BIS2);
+
+  // Comb the field, implicitly defining the seams
+  igl::comb_cross_field(V_ref, F_ref, BIS1, BIS2, BIS1_combed, BIS2_combed);
+
+  // // Find the integer mismatches
+  igl::cross_field_mismatch(V_ref, F_ref, BIS1_combed, BIS2_combed, true,
+                            MMatch);
+
+  // Find the singularities
+  igl::find_cross_field_singularities(V_ref, F_ref, MMatch, isSingularity,
+                                      singularityIndex);
+
+  // Cut the mesh, duplicating all vertices on the seams
+  igl::cut_mesh_from_singularities(V_ref, F_ref, MMatch, Seams);
+
+  // Comb the frame-field accordingly
+  igl::comb_frame_field(V_ref, F_ref, X1, X2, BIS1_combed, BIS2_combed,
+                        X1_combed, X2_combed);
+
+  // Global parametrization
+  Eigen::MatrixXd UV;
+  Eigen::MatrixXi FUV;
+
+  igl::copyleft::comiso::miq(V_ref, F_ref, X1_combed, X2_combed, MMatch,
+                             isSingularity, Seams, UV, FUV, gradient_size,
+                             stiffness, direct_round, iter, 5, true);
+
+  py::list return_list;
+  return_list.append(UV);
+  return_list.append(FUV);
+  return return_list;
+}
+
 class SDPHelper {
 private:
   const Eigen::VectorXd A_data_;
@@ -1396,6 +1468,10 @@ PYBIND11_MODULE(frame_field_utils_bind, m) {
         "Compromised wrap of igl::dual_contouring. Allow passing python "
         "functions but currently only work in serial. Put it here for future "
         "reference.");
+  m.def("miq", &miq, py::return_value_policy::reference_internal,
+        "Bind Mixed-Integer Quadrangulation provided by Libigl. Should be "
+        "subject "
+        "to its GPL-3 license.");
   py::class_<SDPHelper>(m, "SDPHelper")
       .def(py::init<Eigen::Ref<const Eigen::VectorXd>,
                     Eigen::Ref<const Eigen::VectorXi>,
