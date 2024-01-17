@@ -1250,9 +1250,22 @@ py::list dual_contouring_serial(py::function f, py::function f_grad,
 // Copied from:
 // https://github.com/libigl/libigl/blob/main/tutorial/505_MIQ/main.cpp
 py::list miq(Eigen::Ref<const RowMatrixXd> V, Eigen::Ref<const RowMatrixXi> F,
-             Eigen::Ref<const RowMatrixXd> X, double gradient_size, double iter,
-             double stiffness, bool direct_round) {
+             Eigen::Ref<const RowMatrixXd> X, Eigen::Ref<const RowMatrixXi> SE,
+             double gradient_size, double iter, double stiffness,
+             bool direct_round) {
   assert(X.rows() == F.rows());
+  assert(SE.cols() == 2);
+
+  std::vector<std::vector<int>> hard_features;
+
+  if (SE.rows() > 0) {
+    // Could use Eigen::Map, but I still need the loop for initialization so
+    // might as well copy it
+    hard_features.resize(SE.rows());
+    for (size_t i = 0; i < SE.rows(); i++) {
+      hard_features[i] = {SE.coeff(i, 0), SE.coeff(i, 1)};
+    }
+  }
 
   // Workaround DerivedV. Not sure if it would result in copying. Worry about it
   // later...
@@ -1301,7 +1314,8 @@ py::list miq(Eigen::Ref<const RowMatrixXd> V, Eigen::Ref<const RowMatrixXi> F,
 
   igl::copyleft::comiso::miq(V_ref, F_ref, X1_combed, X2_combed, MMatch,
                              isSingularity, Seams, UV, FUV, gradient_size,
-                             stiffness, direct_round, iter, 5, true);
+                             stiffness, direct_round, iter, 5, true, true,
+                             std::vector<int>(), hard_features);
 
   py::list return_list;
   return_list.append(UV);

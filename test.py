@@ -95,8 +95,24 @@ def test_dc():
     ps.remove_all_structures()
 
 
+def test_miq():
+    data = np.load('test_data/miq.npz')
+    V = data['V']
+    F = data['F']
+    Q = data['Q']
+
+    UV, FUV = frame_field_utils.miq(V, F, Q)
+    UV3 = np.hstack([UV, np.ones(len(UV))[:, None]])
+
+    ps.init()
+    ps.register_surface_mesh('param', UV3, FUV)
+    ps.show()
+    ps.remove_all_structures()
+
+
 if __name__ == '__main__':
     test_flowline()
     test_tet()
     test_sdp()
     test_dc()
+    test_miq()
