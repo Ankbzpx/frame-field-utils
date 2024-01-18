@@ -81,27 +81,30 @@ def dual_contouring_serial(f,
 def miq(V,
         F,
         Q,
-        sharp_feature=False,
-        sharp_angle=75,
+        SE=None,
         gradient_size=50,
         stiffness_iter=5,
         stiffness=5.0,
         direct_round=False):
 
-    SE = np.zeros((0, 2), dtype=np.int64)
-    if sharp_feature:
-        import igl
-        _, _, _, EMAP, _, sharp = igl.sharp_edges(V, F,
-                                                  sharp_angle / 180 * np.pi)
-        _, unique_idx = np.unique(EMAP, return_index=True)
+    if SE is None:
+        SE = np.zeros((0, 2), dtype=np.int64)
 
-        F_id = np.tile(np.arange(len(F)), 3)[unique_idx][sharp]
-        V_id = np.repeat(np.arange(3), len(F))[unique_idx][sharp]
-        V_id = (V_id + 1) % 3
+    # An example of computing sharp feature using igl and convert to (f_id, v_in_f_id) format
+    # WARNING! A large number of hard feature constraints can take hours to solve,
+    #   and the miq may fail
+    # import igl
 
-        # WARNING! A large number of hard feature constraints can take hours to solve,
-        #   and the miq may fail
-        SE = np.stack([F_id, V_id], -1)
+    # sharp_angle = 75
+    # _, _, _, EMAP, _, sharp = igl.sharp_edges(V, F,
+    #                                             sharp_angle / 180 * np.pi)
+    # _, unique_idx = np.unique(EMAP, return_index=True)
+
+    # F_id = np.tile(np.arange(len(F)), 3)[unique_idx][sharp]
+    # V_in_f_id = np.repeat(np.arange(3), len(F))[unique_idx][sharp]
+    # V_in_f_id = (V_in_f_id + 1) % 3
+
+    # SE = np.stack([F_id, V_in_f_id], -1)
 
     return frame_field_utils_bind.miq(V, F, Q, SE, gradient_size,
                                       stiffness_iter, stiffness, direct_round)
