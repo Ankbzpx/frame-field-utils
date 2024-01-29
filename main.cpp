@@ -14,6 +14,7 @@
 #include <igl/local_basis.h>
 #include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
+#include <igl/random_points_on_mesh.h>
 #include <igl/ray_mesh_intersect.h>
 #include <igl/rotate_vectors.h>
 #include <igl/slice.h>
@@ -44,23 +45,6 @@ using RowMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
 
 constexpr int kMinParallelSize = 1000;
 
-// https://stackoverflow.com/questions/21237905/how-do-i-generate-thread-safe-uniform-random-numbers
-int randi(int min, int max) {
-  std::random_device rd;
-  static thread_local std::mt19937 rng(rd());
-  std::uniform_int_distribution<int> dist(min, max);
-  return dist(rng);
-}
-
-int randi(int max) { return randi(0, max); }
-
-double randd() {
-  std::random_device rd;
-  static thread_local std::mt19937 rng(rd());
-  std::uniform_real_distribution<double> dist(0.0, 1.0);
-  return dist(rng);
-}
-
 // https://github.com/wjakob/instant-meshes/blob/7b3160864a2e1025af498c84cfed91cbfb613698/src/common.h#L234
 inline double signum(double value) { return std::copysign(1.0, value); }
 
@@ -90,19 +74,6 @@ compact_orientation_extrinsic_rosy4(const Eigen::RowVector3d &q0,
   return std::make_pair(bundle_0[best_0], bundle_1[best_1] * signum(dp));
 }
 
-// Random a barycentric coordinate
-// https://stackoverflow.com/questions/68493050/sample-uniformly-random-points-within-a-triangle
-void random_point_in_triangle(Eigen::RowVector3d *bary_coord) {
-  double u = randd(), v = randd();
-  if (u + v > 1.0) {
-    u = 1.0 - u;
-    v = 1.0 - v;
-  }
-  double w = 1.0 - (u + v);
-
-  *bary_coord << w, u, v;
-}
-
 void vertex_weighted_position(Eigen::RowVector3d *o,
                               const Eigen::RowVector3d &weights, int fid,
                               const RowMatrixXi &F, const RowMatrixXd &V) {
@@ -127,8 +98,8 @@ void project_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n) {
   *q = (*q - n * n.dot(*q)).normalized();
 }
 
-void random_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n) {
-  int start_dir = randi(4);
+void eval_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n,
+                  int start_dir) {
   switch (start_dir) {
   case 1:
     *q = n.cross(*q);
@@ -225,8 +196,7 @@ float rgb_to_intensity(const Eigen::RowVector3d &rgb) {
   return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
 }
 
-int random_color_idx() {
-  const double sample = randd();
+int eval_color_idx(double sample) {
   if (sample < 0.6) {
     return 0;
   } else if (sample < 0.75) {
@@ -257,6 +227,22 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   bitangents.resize(n_lines);
   valid_steps.resize(n_lines);
 
+  // Type std::mt19937
+  auto rng = igl::generate_default_urbg();
+
+  RowMatrixXd B, X;
+  Eigen::VectorXi FI;
+  igl::random_points_on_mesh(n_lines, V, F, B, FI, X, rng);
+
+  std::uniform_real_distribution<double> distd(0.0, 1.0);
+  const Eigen::VectorXd variations =
+      Eigen::VectorXd::NullaryExpr(n_lines, 1, [&]() { return distd(rng); })
+          .array() *
+      delta;
+  std::uniform_int_distribution<int> disti(0, 4);
+  const Eigen::VectorXi dir_picks =
+      Eigen::VectorXi::NullaryExpr(n_lines, 1, [&]() { return disti(rng); });
+
   igl::parallel_for(
       n_lines,
       [&](int idx) {
@@ -264,18 +250,16 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
         os.setZero(n_steps, 3);
         ts.setZero(n_steps, 3);
 
-        int i = 0;
-        int fid = randi(F.rows() - 1);
-        double variation = randd() * delta;
-
-        Eigen::RowVector3d bary_coord;
-        random_point_in_triangle(&bary_coord);
+        int fid = FI.coeff(idx);
+        const double variation = variations.coeff(idx);
+        Eigen::RowVector3d bary_coord = B.row(idx);
 
         Eigen::RowVector3d n, q, o;
         vertex_weighted_normal(&n, bary_coord, fid, F, VN);
         vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
-        random_tangent(&q, n);
+        eval_tangent(&q, n, dir_picks.coeff(idx));
 
+        int i = 0;
         for (; i < n_steps; i++) {
           vertex_weighted_position(&o, bary_coord, fid, F, V);
           o += (line_offset + variation) * n;
@@ -316,15 +300,26 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   color_palettes.row(3) << 174, 216, 204;
   double value_variation = 0.5;
 
+  const Eigen::VectorXd color_picks =
+      Eigen::VectorXd::NullaryExpr(n_lines, 1, [&]() {
+        return distd(rng);
+      }).array();
+  const Eigen::VectorXd intensity_variations =
+      Eigen::VectorXd::NullaryExpr(n_lines, 1, [&]() {
+        return distd(rng);
+      }).array();
+
   const int n_tail_steps = static_cast<int>(n_steps / 4);
   int base = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
     int n_valid = valid_steps[idx];
 
-    Eigen::RowVector3d color = color_palettes.row(random_color_idx());
+    Eigen::RowVector3d color =
+        color_palettes.row(eval_color_idx(color_picks.coeff(idx)));
     const double intensity = rgb_to_intensity(color);
     const double intensity_new =
-        intensity + value_variation * intensity * (2 * randd() - 1);
+        intensity +
+        value_variation * intensity * (2 * intensity_variations.coeff(idx) - 1);
     color *= intensity_new / intensity / 255.0;
 
     for (size_t i = 0; i < n_valid; i++) {
