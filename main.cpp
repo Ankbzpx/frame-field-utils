@@ -12,7 +12,6 @@
 #include <igl/embree/EmbreeIntersector.h>
 #include <igl/find_cross_field_singularities.h>
 #include <igl/local_basis.h>
-#include <igl/parallel_for.h>
 #include <igl/per_face_normals.h>
 #include <igl/random_points_on_mesh.h>
 #include <igl/ray_mesh_intersect.h>
@@ -20,6 +19,7 @@
 #include <igl/slice.h>
 #include <igl/slice_mask.h>
 #include <igl/tet_tet_adjacency.h>
+#include <oneapi/tbb.h>
 #include <pybind11/eigen.h>
 #include <pybind11/functional.h>
 #include <pybind11/gil.h>
@@ -43,7 +43,17 @@ using RowMatrixXi =
     Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using RowMatrix3d = Eigen::Matrix<double, 3, 3, Eigen::RowMajor>;
 
-constexpr int kMinParallelSize = 1000;
+// https://github.com/libigl/libigl/blob/main/include/igl/parallel_for.h
+template <typename Index, typename FunctionType>
+inline void tbb_parallel_for(const Index loop_size, const FunctionType &func) {
+  oneapi::tbb::parallel_for(
+      oneapi::tbb::blocked_range<size_t>(0, loop_size),
+      [&func](const oneapi::tbb::blocked_range<size_t> &r) {
+        for (size_t idx = r.begin(); idx != r.end(); ++idx) {
+          func(idx);
+        }
+      });
+}
 
 // https://github.com/wjakob/instant-meshes/blob/7b3160864a2e1025af498c84cfed91cbfb613698/src/common.h#L234
 inline double signum(double value) { return std::copysign(1.0, value); }
@@ -101,17 +111,17 @@ void project_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n) {
 void eval_tangent(Eigen::RowVector3d *q, const Eigen::RowVector3d &n,
                   int start_dir) {
   switch (start_dir) {
-  case 1:
-    *q = n.cross(*q);
-    break;
-  case 2:
-    *q *= -1;
-    break;
-  case 3:
-    *q = -n.cross(*q);
-    break;
-  default:
-    break;
+    case 1:
+      *q = n.cross(*q);
+      break;
+    case 2:
+      *q *= -1;
+      break;
+    case 3:
+      *q = -n.cross(*q);
+      break;
+    default:
+      break;
   }
 }
 
@@ -243,45 +253,42 @@ py::list trace_flow_lines(Eigen::Ref<const RowMatrixXd> V,
   const Eigen::VectorXi dir_picks =
       Eigen::VectorXi::NullaryExpr(n_lines, 1, [&]() { return disti(rng); });
 
-  igl::parallel_for(
-      n_lines,
-      [&](int idx) {
-        RowMatrixXd os, ts;
-        os.setZero(n_steps, 3);
-        ts.setZero(n_steps, 3);
+  tbb_parallel_for(n_lines, [&](int idx) {
+    RowMatrixXd os, ts;
+    os.setZero(n_steps, 3);
+    ts.setZero(n_steps, 3);
 
-        int fid = FI.coeff(idx);
-        const double variation = variations.coeff(idx);
-        Eigen::RowVector3d bary_coord = B.row(idx);
+    int fid = FI.coeff(idx);
+    const double variation = variations.coeff(idx);
+    Eigen::RowVector3d bary_coord = B.row(idx);
 
-        Eigen::RowVector3d n, q, o;
-        vertex_weighted_normal(&n, bary_coord, fid, F, VN);
-        vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
-        eval_tangent(&q, n, dir_picks.coeff(idx));
+    Eigen::RowVector3d n, q, o;
+    vertex_weighted_normal(&n, bary_coord, fid, F, VN);
+    vertex_weighted_tangent(&q, n, bary_coord, fid, F, VN, Q);
+    eval_tangent(&q, n, dir_picks.coeff(idx));
 
-        int i = 0;
-        for (; i < n_steps; i++) {
-          vertex_weighted_position(&o, bary_coord, fid, F, V);
-          o += (line_offset + variation) * n;
+    int i = 0;
+    for (; i < n_steps; i++) {
+      vertex_weighted_position(&o, bary_coord, fid, F, V);
+      o += (line_offset + variation) * n;
 
-          // Record traced position
-          os.row(i) = o;
-          ts.row(i) = n.cross(q);
+      // Record traced position
+      os.row(i) = o;
+      ts.row(i) = n.cross(q);
 
-          fid = trace_step(&bary_coord, o, q, n, intersector, step_size);
-          if (fid < 0) {
-            break;
-          }
-          vertex_weighted_normal(&n, bary_coord, fid, F, VN);
-          project_tangent(&q, n);
-          compact_tangent(&q, n, bary_coord, fid, F, VN, Q);
-        }
+      fid = trace_step(&bary_coord, o, q, n, intersector, step_size);
+      if (fid < 0) {
+        break;
+      }
+      vertex_weighted_normal(&n, bary_coord, fid, F, VN);
+      project_tangent(&q, n);
+      compact_tangent(&q, n, bary_coord, fid, F, VN, Q);
+    }
 
-        positions[idx] = std::make_unique<RowMatrixXd>(os);
-        bitangents[idx] = std::make_unique<RowMatrixXd>(ts);
-        valid_steps[idx] = i;
-      },
-      1000);
+    positions[idx] = std::make_unique<RowMatrixXd>(os);
+    bitangents[idx] = std::make_unique<RowMatrixXd>(ts);
+    valid_steps[idx] = i;
+  });
 
   int total_valid = 0;
   for (size_t idx = 0; idx < n_lines; idx++) {
@@ -627,20 +634,17 @@ RowMatrixXi tet_fix_index_order(Eigen::Ref<const RowMatrixXd> V,
                                 Eigen::Ref<const RowMatrixXi> T) {
   RowMatrixXi T_fix = T;
 
-  igl::parallel_for(
-      T.rows(),
-      [&](int i) {
-        RowMatrix3d m;
-        m << V.row(T.coeff(i, 1)) - V.row(T.coeff(i, 0)),
-            V.row(T.coeff(i, 2)) - V.row(T.coeff(i, 0)),
-            V.row(T.coeff(i, 3)) - V.row(T.coeff(i, 0));
+  tbb_parallel_for(T.rows(), [&](int i) {
+    RowMatrix3d m;
+    m << V.row(T.coeff(i, 1)) - V.row(T.coeff(i, 0)),
+        V.row(T.coeff(i, 2)) - V.row(T.coeff(i, 0)),
+        V.row(T.coeff(i, 3)) - V.row(T.coeff(i, 0));
 
-        if (m.determinant() < 0) {
-          T_fix.row(i) << T.coeff(i, 0), T.coeff(i, 1), T.coeff(i, 3),
-              T.coeff(i, 2);
-        }
-      },
-      kMinParallelSize);
+    if (m.determinant() < 0) {
+      T_fix.row(i) << T.coeff(i, 0), T.coeff(i, 1), T.coeff(i, 3),
+          T.coeff(i, 2);
+    }
+  });
 
   return T_fix;
 }
@@ -884,13 +888,13 @@ void transition_matrix(const RowMatrix3d &R_i, const RowMatrix3d &R_j,
   }
 }
 
-Eigen::VectorXi
-tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
-                      Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
-                      Eigen::Ref<const Eigen::VectorXi> uE_non_manifold_mask,
-                      Eigen::Ref<const Eigen::VectorXi> uE2T,
-                      Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
-                      Eigen::Ref<const RowMatrixXd> T_frame) {
+Eigen::VectorXi tet_frame_singularity(
+    Eigen::Ref<const RowMatrixXi> uE,
+    Eigen::Ref<const Eigen::VectorXi> uE_boundary_mask,
+    Eigen::Ref<const Eigen::VectorXi> uE_non_manifold_mask,
+    Eigen::Ref<const Eigen::VectorXi> uE2T,
+    Eigen::Ref<const Eigen::VectorXi> uE2T_cumsum,
+    Eigen::Ref<const RowMatrixXd> T_frame) {
   assert(uE2T.size() == uE2T_cumsum.coeff(uE2T_cumsum.size() - 1));
   assert(uE.rows() == uE_boundary_mask.size() == uE_non_manifold_mask.size() ==
          uE2T_cumsum.size() - 1);
@@ -899,36 +903,31 @@ tet_frame_singularity(Eigen::Ref<const RowMatrixXi> uE,
 
   Eigen::VectorXi uE_singularity_mask(uE.rows());
 
-  igl::parallel_for(
-      uE.rows(),
-      [&](int i) {
-        if ((uE_boundary_mask.coeff(i) == 1) ||
-            (uE_non_manifold_mask.coeff(i) == 1)) {
-          // Ignore boundary edges or edges of non-manifold one-ring
-          uE_singularity_mask.coeffRef(i) = false;
-        } else {
-          RowMatrix3d m = RowMatrix3d::Identity(), transition;
-          for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1);
-               j++) {
-            const int t_i = uE2T.coeff(j);
-            // Here we always have one-ring cycle
-            const int t_j = uE2T.coeff((j == uE2T_cumsum.coeff(i + 1) - 1)
-                                           ? uE2T_cumsum.coeff(i)
-                                           : j + 1);
+  tbb_parallel_for(uE.rows(), [&](int i) {
+    if ((uE_boundary_mask.coeff(i) == 1) ||
+        (uE_non_manifold_mask.coeff(i) == 1)) {
+      // Ignore boundary edges or edges of non-manifold one-ring
+      uE_singularity_mask.coeffRef(i) = false;
+    } else {
+      RowMatrix3d m = RowMatrix3d::Identity(), transition;
+      for (int j = uE2T_cumsum.coeff(i); j < uE2T_cumsum.coeff(i + 1); j++) {
+        const int t_i = uE2T.coeff(j);
+        // Here we always have one-ring cycle
+        const int t_j = uE2T.coeff(
+            (j == uE2T_cumsum.coeff(i + 1) - 1) ? uE2T_cumsum.coeff(i) : j + 1);
 
-            const RowMatrix3d R_i =
-                Eigen::Map<const RowMatrix3d>(T_frame.row(t_i).data());
-            const RowMatrix3d R_j =
-                Eigen::Map<const RowMatrix3d>(T_frame.row(t_j).data());
+        const RowMatrix3d R_i =
+            Eigen::Map<const RowMatrix3d>(T_frame.row(t_i).data());
+        const RowMatrix3d R_j =
+            Eigen::Map<const RowMatrix3d>(T_frame.row(t_j).data());
 
-            transition_matrix(R_i, R_j, &transition);
-            m = transition * m;
-          }
-          const bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
-          uE_singularity_mask.coeffRef(i) = is_singular;
-        }
-      },
-      kMinParallelSize);
+        transition_matrix(R_i, R_j, &transition);
+        m = transition * m;
+      }
+      const bool is_singular = (m - RowMatrix3d::Identity()).norm() > 1e-7;
+      uE_singularity_mask.coeffRef(i) = is_singular;
+    }
+  });
 
   return uE_singularity_mask;
 }
@@ -1319,26 +1318,33 @@ py::list miq(Eigen::Ref<const RowMatrixXd> V, Eigen::Ref<const RowMatrixXi> F,
 }
 
 class SDPHelper {
-private:
+ private:
   const Eigen::VectorXd A_data_;
   const Eigen::VectorXi A_indices_;
   const Eigen::VectorXi A_indpter_;
   const Eigen::VectorXd b_;
   const Eigen::VectorXd c_base_;
-  const int m_; // number of constraints
-  const int n_; // number of variables
-  const int z_; // number of linear quality constraints
-  const int s_; // number of semidefinite cone constraints
+  const int m_;  // number of constraints
+  const int n_;  // number of variables
+  const int z_;  // number of linear quality constraints
+  const int s_;  // number of semidefinite cone constraints
 
-public:
+ public:
   SDPHelper() = delete;
   SDPHelper(Eigen::Ref<const Eigen::VectorXd> A_data,
             Eigen::Ref<const Eigen::VectorXi> A_indices,
             Eigen::Ref<const Eigen::VectorXi> A_indpter,
             Eigen::Ref<const Eigen::VectorXd> b,
             Eigen::Ref<const Eigen::VectorXd> c_base, int z, int s)
-      : A_data_(A_data), A_indices_(A_indices), A_indpter_(A_indpter), b_(b),
-        c_base_(c_base), m_(b.size()), n_(c_base.size()), z_(z), s_(s) {}
+      : A_data_(A_data),
+        A_indices_(A_indices),
+        A_indpter_(A_indpter),
+        b_(b),
+        c_base_(c_base),
+        m_(b.size()),
+        n_(c_base.size()),
+        z_(z),
+        s_(s) {}
 
   RowMatrixXd solve(Eigen::Ref<const RowMatrixXd> qs, int group_size) {
     assert(qs.cols() == s_ - 1);
@@ -1353,23 +1359,19 @@ public:
       const int reminder = num_qs % group_size;
       const int loop_count = (reminder > 0) ? num_groups + 1 : num_groups;
 
-      igl::parallel_for(
-          loop_count,
-          [&](int i) {
-            const int row_start = i * group_size;
-            int num_rows = group_size;
+      tbb_parallel_for(loop_count, [&](int i) {
+        const int row_start = i * group_size;
+        int num_rows = group_size;
 
-            if (i == num_groups) {
-              num_rows = reminder;
-            }
+        if (i == num_groups) {
+          num_rows = reminder;
+        }
 
-            // Don't think I am allowed to pass the block's address?
-            RowMatrixXd q_proj_block =
-                q_proj.block(row_start, 0, num_rows, s_ - 1);
-            sdp_batch(&q_proj_block);
-            q_proj.block(row_start, 0, num_rows, s_ - 1) = q_proj_block;
-          },
-          1);
+        // Don't think I am allowed to pass the block's address?
+        RowMatrixXd q_proj_block = q_proj.block(row_start, 0, num_rows, s_ - 1);
+        sdp_batch(&q_proj_block);
+        q_proj.block(row_start, 0, num_rows, s_ - 1) = q_proj_block;
+      });
     }
     return q_proj;
   }

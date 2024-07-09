@@ -13,7 +13,8 @@ igl_include(embree)
 igl_include(copyleft comiso)
 
 include(scs)
+include(tbb)
 
 add_subdirectory(pybind11)
 pybind11_add_module(${PROJECT_NAME} main.cpp)
-target_link_libraries(${PROJECT_NAME} PUBLIC igl::embree igl_copyleft::comiso scsdir)
+target_link_libraries(${PROJECT_NAME} PUBLIC igl::embree igl_copyleft::comiso scsdir TBB::tbb)
